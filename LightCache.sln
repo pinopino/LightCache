@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio 15
+VisualStudioVersion = 15.0.28307.1022
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LightCache", "src\LightCache\LightCache.csproj", "{68CA9A92-8A3F-4F78-A47E-B84782780F73}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{68CA9A92-8A3F-4F78-A47E-B84782780F73}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{68CA9A92-8A3F-4F78-A47E-B84782780F73}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{68CA9A92-8A3F-4F78-A47E-B84782780F73}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{68CA9A92-8A3F-4F78-A47E-B84782780F73}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {1AA04D87-4711-42F6-9184-15CD874C723A}
+	EndGlobalSection
+EndGlobal
