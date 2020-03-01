@@ -14,21 +14,28 @@ namespace LightCache
     /// </summary>
     public class LightCacher : CacheService
     {
-        private readonly object _lockobj;
-        private bool _useL2; // 是否启用二级缓存
         private MemoryCache _cache;
+        private volatile int _remote_inited;
         private RemoteCache _remote;
-        public RemoteCache Remote { get { return _remote; } }
-        public readonly TimeSpan DefaultExpiry;
+        public TimeSpan DefaultExpiry { get; private set; }
+        private ConcurrentDictionary<string, SemaphoreSlim> _locks;
 
-        public LightCacher(long? capacity, int expiration = 60, bool useL2 = false)
+        public LightCacher(long? capacity, int expiration = 60)
         {
-            _lockobj = new object();
             DefaultExpiry = TimeSpan.FromSeconds(expiration);
-            _useL2 = useL2;
+            _locks = new ConcurrentDictionary<string, SemaphoreSlim>();
             _cache = new MemoryCache(new MemoryCacheOptions { SizeLimit = capacity });
-            if (_useL2)
-                _remote = new RemoteCache();
+        }
+
+        public RemoteCache Remote
+        {
+            private set { _remote = value; }
+            get
+            {
+                if (_remote_inited == 1)
+                    return _remote;
+                throw new InvalidOperationException("RemoteCache还未初始化，请先调用InitRemote函数");
+            }
         }
 
         /// <summary>
@@ -36,41 +43,60 @@ namespace LightCache
         /// </summary>
         public void InitRemote()
         {
-            if (_remote != null)
-                _remote = new RemoteCache();
+            if (Interlocked.Exchange(ref _remote_inited, 1) == 0)
+            {
+                if (Remote != null)
+                    Remote = new RemoteCache();
+            }
         }
 
         /// <summary>
         /// 判定指定键是否存在
         /// </summary>
+        /// <param name="key">指定的键</param>
+        /// <returns>true存在，否则不存在</returns>
         public bool Exists(string key)
         {
+            EnsureKey(key);
+
             return _cache.TryGetValue(key, out _);
         }
 
         /// <summary>
         /// 移除指定键
         /// </summary>
+        /// <param name="key">指定的键</param>
+        /// <returns>true操作成功，否则失败</returns>
         public bool Remove(string key)
         {
+            EnsureKey(key);
+
             _cache.Remove(key);
+
             return true;
         }
 
         /// <summary>
         /// 批量移除指定键
         /// </summary>
+        /// <param name="keys">指定的键集合</param>
+        /// <returns>true操作成功，否则失败</returns>
         public bool RemoveAll(IEnumerable<string> keys)
         {
+            EnsureNotNull(nameof(keys), keys);
+
             foreach (var item in keys)
                 _cache.Remove(item);
+
             return true;
         }
 
-        #region object
         /// <summary>
         /// 获取指定key对应的缓存项
         /// </summary>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="key">指定的键</param>
+        /// <returns>若存在返回对应项，否则返回T类型的默认值</returns>
         public T Get<T>(string key)
         {
             EnsureKey(key);
@@ -84,11 +110,12 @@ namespace LightCache
 
         /// <summary>
         /// 获取指定key对应的缓存项，若不存在则填入valFactory产生的值并设定绝对过期时间
-        /// 例：GetOrAdd("key", () => new object(), DateTimeOffset.Now.AddSeconds(60))
         /// </summary>
-        /// <remarks>
-        /// valFactory执行代价较大时应该调用GetOrAddAsync函数
-        /// </remarks>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="key">指定的键</param>
+        /// <param name="valFactory">缓存值的构造factory</param>
+        /// <param name="absExp">绝对过期时间</param>
+        /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
         public T GetOrAdd<T>(string key, Func<T> valFactory, DateTimeOffset absExp)
         {
             EnsureKey(key);
@@ -101,11 +128,12 @@ namespace LightCache
 
         /// <summary>
         /// 获取指定key对应的缓存项，若不存在则填入valFactory产生的值并设定滑动过期时间
-        /// 例：GetOrAdd("key", () => new object(), TimeSpan.FromSeconds(60))
         /// </summary>
-        /// <remarks>
-        /// 在valFactory执行代价较大时应该调用GetOrAddAsync函数
-        /// </remarks>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="key">指定的键</param>
+        /// <param name="valFactory">缓存值的构造factory</param>
+        /// <param name="absExp">滑动过期时间</param>
+        /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
         public T GetOrAdd<T>(string key, Func<T> valFactory, TimeSpan slidingExp)
         {
             EnsureKey(key);
@@ -117,12 +145,13 @@ namespace LightCache
         }
 
         /// <summary>
-        /// 获取指定key对应的缓存项，若不存在则填入valFactory产生的值并设定绝对过期时间
-        /// 例：GetOrAdd("key", () => new object(), DateTimeOffset.Now.AddSeconds(60))
+        /// 异步获取指定key对应的缓存项，若不存在则填入valFactory产生的值并设定绝对过期时间
         /// </summary>
-        /// <remarks>
-        /// valFactory执行代价较大时应该调用GetOrAddAsync函数
-        /// </remarks>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="key">指定的键</param>
+        /// <param name="valFactory">缓存值的构造factory</param>
+        /// <param name="absExp">绝对过期时间</param>
+        /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
         public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset absExp)
         {
             EnsureKey(key);
@@ -134,12 +163,13 @@ namespace LightCache
         }
 
         /// <summary>
-        /// 获取指定key对应的缓存项，若不存在则填入valFactory产生的值并设定滑动过期时间
-        /// 例：GetOrAdd("key", () => new object(), TimeSpan.FromSeconds(60))
+        /// 异步获取指定key对应的缓存项，若不存在则填入valFactory产生的值并设定滑动过期时间
         /// </summary>
-        /// <remarks>
-        /// 在valFactory执行代价较大时且开启L2时函数倾向于从二级缓存获取计算好的数据（尽量保证不给上层业务添负担）
-        /// </remarks>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="key">指定的键</param>
+        /// <param name="valFactory">缓存值的构造factory</param>
+        /// <param name="slidingExp">滑动过期时间</param>
+        /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
         public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan slidingExp)
         {
             EnsureKey(key);
@@ -151,17 +181,24 @@ namespace LightCache
         }
 
         /// <summary>
-        /// 获取指定key对应的object，若不存在则填入value并设定滑动过期时间（默认60s）
+        /// 缓存一个值，并设定默认过期时间（滑动过期）
         /// </summary>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="key">指定的键</param>
+        /// <param name="value">要缓存的值</param>
         public void Add<T>(string key, T value)
         {
             EnsureKey(key);
-            InnerSet(key, value, null, null);
+            InnerSet(key, value, null, DefaultExpiry);
         }
 
         /// <summary>
-        /// 获取指定key对应的object，若不存在则填入value并设定绝对过期时间
+        /// 缓存一个值，并设定绝对过期时间
         /// </summary>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="key">指定的键</param>
+        /// <param name="value">要缓存的值</param>
+        /// <param name="absExp">绝对过期时间</param>
         public void Add<T>(string key, T value, DateTimeOffset absExp)
         {
             EnsureKey(key);
@@ -169,8 +206,12 @@ namespace LightCache
         }
 
         /// <summary>
-        /// 获取指定key对应的object，若不存在则填入value并设定滑动过期时间
+        /// 缓存一个值，并设定滑动过期时间
         /// </summary>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="key">指定的键</param>
+        /// <param name="value">要缓存的值</param>
+        /// <param name="slidingExp">滑动过期时间</param>
         public void Add<T>(string key, T value, TimeSpan slidingExp)
         {
             EnsureKey(key);
@@ -180,53 +221,63 @@ namespace LightCache
         /// <summary>
         /// 批量获取指定键对应的object
         /// </summary>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="keys">指定的键集合</param>
+        /// <returns>一个字典包含键和对应的值</returns>
         public IDictionary<string, T> GetAll<T>(IEnumerable<string> keys)
             where T : class
         {
-            if (keys == null || keys.Any(p => string.IsNullOrEmpty(p)))
-                throw new InvalidOperationException("keys集合不能为空且不允许出现空值的key");
+            EnsureNotNull(nameof(keys), keys);
 
             var ret = new Dictionary<string, T>();
             foreach (var key in keys)
-                ;//ret[key] = InnerGet<T>(key, null, null, null);
+            {
+                InnerGet(key, null, null, null, out T value);
+                ret[key] = value;
+            }
 
             return ret;
         }
 
         /// <summary>
-        /// 批量缓存object列表并设定滑动过期时间（默认60s）
+        /// 批量缓存值，并设定默认过期时间（滑动过期）
         /// </summary>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="items">要缓存的键值集合</param>
+        /// <returns>true为成功，否则失败</returns>
         public bool AddAll<T>(IDictionary<string, T> items)
-            where T : class
         {
             return AddAll(items, DefaultExpiry);
         }
 
         /// <summary>
-        /// 批量缓存object列表并设定绝对过期时间
+        /// 批量缓存值，并设定绝对过期时间
         /// </summary>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="items">要缓存的键值集合</param>
+        /// <param name="absExp">绝对过期时间</param>
+        /// <returns>true为成功，否则失败</returns>
         public bool AddAll<T>(IDictionary<string, T> items, DateTimeOffset absExp)
-            where T : class
         {
             return AddAll(items, absExp.DateTime.Subtract(DateTime.Now));
         }
 
         /// <summary>
-        /// 批量缓存object列表并设定滑动过期时间
+        /// 批量缓存值，并设定滑动过期时间
         /// </summary>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="items">要缓存的键值集合</param>
+        /// <param name="slidingExp">滑动过期时间</param>
+        /// <returns>true为成功，否则失败</returns>
         public bool AddAll<T>(IDictionary<string, T> items, TimeSpan slidingExp)
-            where T : class
         {
-            if (items == null || items.Keys.Count == 0)
-                throw new InvalidOperationException("集合不允许为空");
+            EnsureNotNull(nameof(items), items);
 
             foreach (var key in items.Keys)
                 InnerSet(key, items[key], null, slidingExp);
 
             return true;
         }
-        #endregion
-
 
         private bool InnerGet<T>(string key, Func<T> valFactory, DateTimeOffset? absExp, TimeSpan? slidingExp, out T value)
         {
@@ -264,8 +315,6 @@ namespace LightCache
             return true;
         }
 
-
-        private ConcurrentDictionary<string, SemaphoreSlim> _locks = new ConcurrentDictionary<string, SemaphoreSlim>();
         private async Task<AsyncResult> InnerGetAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset? absExp, TimeSpan? slidingExp)
         {
             // memorycache本身是线程安全的
@@ -320,7 +369,7 @@ namespace LightCache
         public void Dispose()
         {
             _cache.Dispose();
-            _remote.Dispose();
+            Remote.Dispose();
         }
     }
 }
