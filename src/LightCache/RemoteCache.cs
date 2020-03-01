@@ -19,13 +19,6 @@ namespace LightCache.Remote
     public class RemoteCache : CacheService
     {
         private readonly object _lockobj = new object();
-        private readonly object _lockint = new object();
-        private readonly object _locklong = new object();
-        private readonly object _lockdouble = new object();
-        private readonly object _lockdecimal = new object();
-        private readonly object _lockbool = new object();
-        private readonly object _lockdatetime = new object();
-        private readonly object _lockstring = new object();
         private IDatabase _db;
         private static ConnectionMultiplexer _connector;
         private RedLockFactory _redlockFactory;
@@ -33,7 +26,7 @@ namespace LightCache.Remote
         private readonly TimeSpan _redlock_expiry;
         private readonly TimeSpan _redlock_wait;
         private readonly TimeSpan _redlock_retry;
-        public static readonly TimeSpan DefaultExpiry = TimeSpan.FromMinutes(5);
+        private ConcurrentDictionary<string, SemaphoreSlim> _locks = new ConcurrentDictionary<string, SemaphoreSlim>();
 
         public RemoteCache()
         {
@@ -54,7 +47,19 @@ namespace LightCache.Remote
         /// </summary>
         public bool Exists(string key)
         {
+            EnsureKey(key);
+
             return _db.KeyExists(key);
+        }
+
+        /// <summary>
+        /// 判定指定键是否存在，异步
+        /// </summary>
+        public Task<bool> ExistsAsync(string key)
+        {
+            EnsureKey(key);
+
+            return _db.KeyExistsAsync(key);
         }
 
         /// <summary>
@@ -62,7 +67,19 @@ namespace LightCache.Remote
         /// </summary>
         public bool Remove(string key)
         {
+            EnsureKey(key);
+
             return _db.KeyDelete(key);
+        }
+
+        /// <summary>
+        /// 移除指定键，异步
+        /// </summary>
+        public Task<bool> RemoveAsync(string key)
+        {
+            EnsureKey(key);
+
+            return _db.KeyDeleteAsync(key);
         }
 
         /// <summary>
@@ -70,18 +87,32 @@ namespace LightCache.Remote
         /// </summary>
         public void RemoveAll(IEnumerable<string> keys)
         {
+            EnsureNotNull(nameof(keys), keys);
+
             var redisKeys = keys.Select(x => (RedisKey)x).ToArray();
             _db.KeyDelete(redisKeys);
         }
 
         /// <summary>
-        /// 获取指定key对应的object
+        /// 批量移除指定键，异步
         /// </summary>
-        public T Get<T>(string key)
+        public Task RemoveAllAsync(IEnumerable<string> keys)
+        {
+            EnsureNotNull(nameof(keys), keys);
+
+            var redisKeys = keys.Select(x => (RedisKey)x).ToArray();
+
+            return _db.KeyDeleteAsync(redisKeys);
+        }
+
+        /// <summary>
+        /// 获取指定key对应的缓存项
+        /// </summary>
+        public T Get<T>(string key, TimeSpan? expiry = null)
         {
             EnsureKey(key);
 
-            var success = InnerGet(key, null, null, out T value);
+            var success = InnerGet(key, null, expiry, out T value);
             if (success)
                 return value;
 
@@ -89,13 +120,13 @@ namespace LightCache.Remote
         }
 
         /// <summary>
-        /// 获取指定key对应的object
+        /// 获取指定key对应的缓存项，异步
         /// </summary>
-        public async Task<T> GetAsync<T>(string key)
+        public async Task<T> GetAsync<T>(string key, TimeSpan? expiry)
         {
             EnsureKey(key);
 
-            var res = await InnerGetAsync<T>(key, null, null);
+            var res = await InnerGetAsync<T>(key, null, expiry);
             if (res.Success)
                 return (T)res.Value;
 
@@ -122,10 +153,8 @@ namespace LightCache.Remote
             EnsureNotNull(nameof(valFactory), valFactory);
 
             var res = await InnerGetAsync(key, () => Task.FromResult(valFactory()), expiry);
-            if (res.Success)
-                return (T)res.Value;
 
-            return default(T);
+            return (T)res.Value;
         }
 
         public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan expiry)
@@ -134,87 +163,98 @@ namespace LightCache.Remote
             EnsureNotNull(nameof(valFactory), valFactory);
 
             var res = await InnerGetAsync(key, valFactory, expiry);
-            if (res.Success)
-                return (T)res.Value;
 
-            return default(T);
+            return (T)res.Value;
         }
 
         /// <summary>
-        /// 获取指定key对应的object，若不存在则填入value并设定过期时间（默认60s）
+        /// 获取指定key对应的object，若不存在则填入value并设定过期时间
         /// </summary>
-        public bool AddObject<T>(string key, T value)
+        public bool Add<T>(string key, T value, TimeSpan? expiry)
         {
             // link: https://stackoverflow.com/questions/25898333/how-to-add-generic-list-to-redis-via-stackexchange-redis
-            return _db.StringSet(key, JsonConvert.SerializeObject(value), DefaultExpiry);
-        }
-
-        /// <summary>
-        /// 获取指定key对应的object，若不存在则填入value并设定过期时间
-        /// </summary>
-        public bool AddObject<T>(string key, T value, DateTimeOffset expiry)
-        {
-            return _db.StringSet(key, JsonConvert.SerializeObject(value), expiry.DateTime.Subtract(DateTime.Now));
-        }
-
-        /// <summary>
-        /// 获取指定key对应的object，若不存在则填入value并设定过期时间
-        /// </summary>
-        public bool AddObject<T>(string key, T value, TimeSpan expiry)
-        {
             return _db.StringSet(key, JsonConvert.SerializeObject(value), expiry);
+        }
+
+        public Task<bool> AddAsync<T>(string key, T value, TimeSpan? expiry)
+        {
+            return _db.StringSetAsync(key, JsonConvert.SerializeObject(value), expiry);
         }
 
         /// <summary>
         /// 批量获取指定键对应的object
         /// </summary>
-        public IDictionary<string, T> GetAllObject<T>(IEnumerable<string> keys)
+        public IDictionary<string, T> GetAll<T>(IEnumerable<string> keys, TimeSpan? expiry)
         {
+            EnsureNotNull(nameof(keys), keys);
+
             var redisKeys = keys.Select(x => (RedisKey)x).ToArray();
-            var result = _db.StringGet(redisKeys);
+            var res = _db.StringGet(redisKeys);
 
             var ret = new Dictionary<string, T>();
             for (var index = 0; index < redisKeys.Length; index++)
             {
-                var value = result[index];
+                var value = res[index];
                 ret.Add(redisKeys[index], value == RedisValue.Null ? default(T) : JsonConvert.DeserializeObject<T>(value));
+            }
+
+            if (expiry.HasValue)
+                UpdateExpiryAll(keys.ToArray(), expiry.Value);
+
+            return ret;
+        }
+
+        public async Task<IDictionary<string, T>> GetAllAsync<T>(IEnumerable<string> keys, TimeSpan? expiry)
+        {
+            EnsureNotNull(nameof(keys), keys);
+
+            var redisKeys = keys.Select(x => (RedisKey)x).ToArray();
+            var res = await _db.StringGetAsync(redisKeys);
+
+            var ret = new Dictionary<string, T>(StringComparer.Ordinal);
+            for (var index = 0; index < redisKeys.Length; index++)
+            {
+                var value = res[index];
+                ret.Add(redisKeys[index], value == RedisValue.Null ? default(T) : JsonConvert.DeserializeObject<T>(value));
+            }
+
+            if (expiry.HasValue)
+                await UpdateExpiryAllAsync(keys.ToArray(), expiry.Value);
+
+            return ret;
+        }
+
+        /// <summary>
+        /// 批量缓存object列表并设定过期时间
+        /// </summary>
+        public bool AddAll<T>(IDictionary<string, T> items, TimeSpan? expiry)
+        {
+            var values = items
+                .Select(p => new KeyValuePair<RedisKey, RedisValue>(p.Key, JsonConvert.SerializeObject(p.Value)))
+                .ToArray();
+
+            var ret = _db.StringSet(values);
+            if (expiry.HasValue)
+            {
+                foreach (var value in values)
+                    _db.KeyExpire(value.Key, expiry);
             }
 
             return ret;
         }
 
-        /// <summary>
-        /// 批量缓存object列表并设定过期时间（默认60s）
-        /// </summary>
-        public bool AddAllObject<T>(IList<(string key, T val)> items)
-        {
-            return AddAllObject(items, DefaultExpiry);
-        }
-
-        /// <summary>
-        /// 批量缓存object列表并设定过期时间
-        /// </summary>
-        public bool AddAllObject<T>(IList<(string key, T val)> items, DateTimeOffset expiry)
-        {
-            return AddAllObject(items, expiry.DateTime.Subtract(DateTime.Now));
-        }
-
-        /// <summary>
-        /// 批量缓存object列表并设定过期时间
-        /// </summary>
-        public bool AddAllObject<T>(IList<(string key, T val)> items, TimeSpan expiry)
+        public async Task<bool> AddAllAsync<T>(IDictionary<string, T> items, TimeSpan? expiry)
         {
             var values = items
-                .Select(item => new KeyValuePair<RedisKey, RedisValue>(item.key, JsonConvert.SerializeObject(item.val)))
+                .Select(p => new KeyValuePair<RedisKey, RedisValue>(p.Key, JsonConvert.SerializeObject(p.Value)))
                 .ToArray();
 
-            var ret = _db.StringSet(values);
-            foreach (var value in values)
-                _db.KeyExpire(value.Key, expiry);
+            var ret = await _db.StringSetAsync(values);
+            if (expiry.HasValue)
+                Parallel.ForEach(values, async value => await _db.KeyExpireAsync(value.Key, expiry));
 
             return ret;
         }
-
 
         internal bool InnerGet<T>(string key, Func<T> valFactory, TimeSpan? expiry, out T value)
         {
@@ -235,11 +275,13 @@ namespace LightCache.Remote
                 }
             }
 
+            if (expiry.HasValue)
+                _db.KeyExpire(key, expiry);
             value = JsonConvert.DeserializeObject<T>(res);
+
             return true;
         }
 
-        private ConcurrentDictionary<string, SemaphoreSlim> _locks = new ConcurrentDictionary<string, SemaphoreSlim>();
         internal async Task<AsyncResult> InnerGetAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan? expiry)
         {
             var res = await _db.StringGetAsync(key);
@@ -262,7 +304,44 @@ namespace LightCache.Remote
                 }
             }
 
+            if (expiry.HasValue)
+                await _db.KeyExpireAsync(key, expiry);
+
             return new AsyncResult { Success = true, Value = JsonConvert.DeserializeObject<T>(res) };
+        }
+
+        private IDictionary<string, bool> UpdateExpiryAll(string[] keys, TimeSpan expiry)
+        {
+            var ret = new Dictionary<string, bool>();
+            for (int i = 0; i < keys.Length; i++)
+                ret.Add(keys[i], UpdateExpiry(keys[i], expiry));
+
+            return ret;
+        }
+
+        private async Task<IDictionary<string, bool>> UpdateExpiryAllAsync(string[] keys, TimeSpan expiry)
+        {
+            var ret = new Dictionary<string, bool>();
+            for (int i = 0; i < keys.Length; i++)
+                ret.Add(keys[i], await UpdateExpiryAsync(keys[i], expiry));
+
+            return ret;
+        }
+
+        private bool UpdateExpiry(string key, TimeSpan expiry)
+        {
+            if (_db.KeyExists(key))
+                return _db.KeyExpire(key, expiry);
+
+            return false;
+        }
+
+        private async Task<bool> UpdateExpiryAsync(string key, TimeSpan expiry)
+        {
+            if (await _db.KeyExistsAsync(key))
+                return await _db.KeyExpireAsync(key, expiry);
+
+            return false;
         }
 
         public void Dispose()

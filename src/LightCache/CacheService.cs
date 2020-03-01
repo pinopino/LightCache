@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Linq;
 
 namespace LightCache
 {
@@ -10,6 +11,13 @@ namespace LightCache
         {
             if (string.IsNullOrEmpty(key))
                 throw new ArgumentNullException("缓存键不能为空");
+        }
+
+        protected void EnsureNotNull<T>(string name, IEnumerable<T> value)
+        {
+            EnsureNotNull(name, value);
+            if (!value.Any())
+                throw new InvalidOperationException("提供的集合中含有空项");
         }
 
         protected void EnsureNotNull(string name, object value)

@@ -129,10 +129,8 @@ namespace LightCache
             EnsureNotNull(nameof(valFactory), valFactory);
 
             var res = await InnerGetAsync(key, valFactory, absExp, null);
-            if (res.Success)
-                return (T)res.Value;
 
-            return default(T);
+            return (T)res.Value;
         }
 
         /// <summary>
@@ -148,10 +146,8 @@ namespace LightCache
             EnsureNotNull(nameof(valFactory), valFactory);
 
             var res = await InnerGetAsync(key, valFactory, null, slidingExp);
-            if (res.Success)
-                return (T)res.Value;
 
-            return default(T);
+            return (T)res.Value;
         }
 
         /// <summary>
