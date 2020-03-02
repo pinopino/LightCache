@@ -3,7 +3,6 @@ using Microsoft.Extensions.Caching.Memory;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -12,10 +11,10 @@ namespace LightCache
     /// <summary>
     /// LightCacher缓存交互接口
     /// </summary>
-    public class LightCacher : CacheService
+    public class LightCacher : CacheService, IDisposable
     {
-        private MemoryCache _cache;
         private volatile int _remote_inited;
+        private MemoryCache _cache;
         private RemoteCache _remote;
         public TimeSpan DefaultExpiry { get; private set; }
         private ConcurrentDictionary<string, SemaphoreSlim> _locks;
@@ -41,12 +40,12 @@ namespace LightCache
         /// <summary>
         /// 如果想单独使用remotecache，则先初始化一波
         /// </summary>
-        public void InitRemote()
+        public void InitRemote(string host)
         {
             if (Interlocked.Exchange(ref _remote_inited, 1) == 0)
             {
                 if (Remote != null)
-                    Remote = new RemoteCache();
+                    Remote = new RemoteCache(host);
             }
         }
 
@@ -219,7 +218,7 @@ namespace LightCache
         }
 
         /// <summary>
-        /// 批量获取指定键对应的object
+        /// 批量获取指定键对应的缓存项
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="keys">指定的键集合</param>
@@ -369,6 +368,11 @@ namespace LightCache
         public void Dispose()
         {
             _cache.Dispose();
+            if (_locks != null)
+            {
+                foreach (var @lock in _locks)
+                    @lock.Value.Dispose();
+            }
             Remote.Dispose();
         }
     }

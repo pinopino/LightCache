@@ -1,20 +1,24 @@
-﻿//using Microsoft.Extensions.Caching.Memory;
+﻿//using LightCache.Remote;
+//using Microsoft.Extensions.Caching.Memory;
 //using System;
 //using System.Collections.Generic;
-//using System.Text;
 
-//namespace LightCache
+//namespace LightCache.Mixin
 //{
-//    public class MixinCache : CacheService
+//    public class MultiCache : CacheService
 //    {
 //        private readonly object _lockobj;
-//        private bool _useL2; // 是否启用二级缓存
-
 //        public readonly TimeSpan DefaultExpiry;
-
-
-
 //        private MemoryCache _cache;
+//        private RemoteCache _remote;
+
+//        public MultiCache(string host, long? localSizeLimit, int expiration = 60)
+//        {
+//            _lockobj = new object();
+//            _cache = MemoryCache.Default;
+            
+//                _remote = new RemoteCache();
+//        }
 
 //        /// <summary>
 //        /// 判定指定键是否存在
