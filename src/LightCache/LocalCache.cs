@@ -11,11 +11,12 @@ namespace LightCache
     /// <summary>
     /// LightCacher缓存交互接口
     /// </summary>
-    public class LightCacher : CacheService, IDisposable
+    public partial class LightCacher : CacheService, IDisposable
     {
         private volatile int _remote_inited;
         private MemoryCache _cache;
         private RemoteCache _remote;
+        private MultiCache _multi;
         public TimeSpan DefaultExpiry { get; private set; }
         private ConcurrentDictionary<string, SemaphoreSlim> _locks;
 
@@ -37,6 +38,16 @@ namespace LightCache
             }
         }
 
+        public MultiCache Multi
+        {
+            get
+            {
+                if (_remote_inited == 1)
+                    return _multi;
+                throw new InvalidOperationException("RemoteCache还未初始化，请先调用InitRemote函数");
+            }
+        }
+
         /// <summary>
         /// 如果想单独使用remotecache，则先初始化一波
         /// </summary>
@@ -44,8 +55,12 @@ namespace LightCache
         {
             if (Interlocked.Exchange(ref _remote_inited, 1) == 0)
             {
-                if (Remote != null)
+                if (Remote == null)
+                {
                     Remote = new RemoteCache(host);
+                    // remote被开启之后，其实默认MultiCache也就算开启了
+                    _multi = new MultiCache(this, _remote);
+                }
             }
         }
 

@@ -316,7 +316,7 @@ namespace LightCache.Remote
 
         internal bool InnerGet<T>(string key, Func<T> valFactory, TimeSpan? expiry, out T value)
         {
-            lock (string.Intern($"___cache_key_{key}")) // key处理下，避免意外lock
+            lock (string.Intern($"___rcache_key_{key}")) // key处理下，避免意外lock
             {
                 var res = _db.StringGet(key);
                 if (!res.HasValue)
