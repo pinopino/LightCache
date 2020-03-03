@@ -1,12 +1,14 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Text;
 using System.Linq;
 
 namespace LightCache
 {
     public class CacheService
     {
+        protected CacheService()
+        { }
+
         protected void EnsureKey(string key)
         {
             if (string.IsNullOrEmpty(key))

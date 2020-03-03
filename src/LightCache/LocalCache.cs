@@ -130,12 +130,12 @@ namespace LightCache
         /// <param name="valFactory">缓存值的构造factory</param>
         /// <param name="absExp">绝对过期时间</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public T GetOrAdd<T>(string key, Func<T> valFactory, DateTimeOffset absExp)
+        public T GetOrAdd<T>(string key, Func<T> valFactory, DateTimeOffset? absExp = null)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            InnerGet(key, valFactory, absExp, null, out T value);
+            InnerGet(key, valFactory, GetDefaultFor(absExp), null, out T value);
 
             return value;
         }
@@ -148,12 +148,12 @@ namespace LightCache
         /// <param name="valFactory">缓存值的构造factory</param>
         /// <param name="absExp">滑动过期时间</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public T GetOrAdd<T>(string key, Func<T> valFactory, TimeSpan slidingExp)
+        public T GetOrAdd<T>(string key, Func<T> valFactory, TimeSpan? slidingExp = null)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            InnerGet(key, valFactory, null, slidingExp, out T value);
+            InnerGet(key, valFactory, null, slidingExp ?? DefaultExpiry, out T value);
 
             return value;
         }
@@ -166,12 +166,13 @@ namespace LightCache
         /// <param name="valFactory">缓存值的构造factory</param>
         /// <param name="absExp">绝对过期时间</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset absExp)
+        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset? absExp = null)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            var res = await InnerGetAsync(key, valFactory, absExp, null);
+            var res = await InnerGetAsync(key, valFactory, GetDefaultFor(absExp), null)
+                .ConfigureAwait(false);
 
             return (T)res.Value;
         }
@@ -184,12 +185,13 @@ namespace LightCache
         /// <param name="valFactory">缓存值的构造factory</param>
         /// <param name="slidingExp">滑动过期时间</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan slidingExp)
+        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan? slidingExp = null)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            var res = await InnerGetAsync(key, valFactory, null, slidingExp);
+            var res = await InnerGetAsync(key, valFactory, null, slidingExp ?? DefaultExpiry)
+                .ConfigureAwait(false);
 
             return (T)res.Value;
         }
@@ -213,10 +215,10 @@ namespace LightCache
         /// <param name="key">指定的键</param>
         /// <param name="value">要缓存的值</param>
         /// <param name="absExp">绝对过期时间</param>
-        public void Add<T>(string key, T value, DateTimeOffset absExp)
+        public void Add<T>(string key, T value, DateTimeOffset? absExp = null)
         {
             EnsureKey(key);
-            InnerSet(key, value, absExp, null);
+            InnerSet(key, value, GetDefaultFor(absExp), null);
         }
 
         /// <summary>
@@ -226,10 +228,10 @@ namespace LightCache
         /// <param name="key">指定的键</param>
         /// <param name="value">要缓存的值</param>
         /// <param name="slidingExp">滑动过期时间</param>
-        public void Add<T>(string key, T value, TimeSpan slidingExp)
+        public void Add<T>(string key, T value, TimeSpan? slidingExp = null)
         {
             EnsureKey(key);
-            InnerSet(key, value, null, slidingExp);
+            InnerSet(key, value, null, slidingExp ?? DefaultExpiry);
         }
 
         /// <summary>
@@ -271,9 +273,15 @@ namespace LightCache
         /// <param name="items">要缓存的键值集合</param>
         /// <param name="absExp">绝对过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool AddAll<T>(IDictionary<string, T> items, DateTimeOffset absExp)
+        public bool AddAll<T>(IDictionary<string, T> items, DateTimeOffset? absExp = null)
         {
-            return AddAll(items, absExp.DateTime.Subtract(DateTime.Now));
+            EnsureNotNull(nameof(items), items);
+
+            var abs = GetDefaultFor(absExp);
+            foreach (var key in items.Keys)
+                InnerSet(key, items[key], abs, null);
+
+            return true;
         }
 
         /// <summary>
@@ -283,12 +291,13 @@ namespace LightCache
         /// <param name="items">要缓存的键值集合</param>
         /// <param name="slidingExp">滑动过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool AddAll<T>(IDictionary<string, T> items, TimeSpan slidingExp)
+        public bool AddAll<T>(IDictionary<string, T> items, TimeSpan? slidingExp = null)
         {
             EnsureNotNull(nameof(items), items);
 
+            var span = slidingExp ?? DefaultExpiry;
             foreach (var key in items.Keys)
-                InnerSet(key, items[key], null, slidingExp);
+                InnerSet(key, items[key], null, span);
 
             return true;
         }
@@ -373,11 +382,20 @@ namespace LightCache
             MemoryCacheEntryOptions cep = new MemoryCacheEntryOptions();
             cep.Priority = CacheItemPriority.Normal;
             cep.SetSize(1);
+
             if (absExp.HasValue)
                 cep.AbsoluteExpiration = absExp.Value;
             if (slidingExp.HasValue)
                 cep.SlidingExpiration = slidingExp.Value;
+
             _cache.Set(key, value, cep);
+        }
+
+        private DateTimeOffset GetDefaultFor(DateTimeOffset? absExp, bool utc = false)
+        {
+            return absExp.HasValue ?
+                absExp.Value :
+                ((utc ? DateTimeOffset.UtcNow : DateTimeOffset.Now) + DefaultExpiry);
         }
 
         public void Dispose()
