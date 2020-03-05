@@ -117,11 +117,9 @@ namespace LightCache.Remote
             // 过期的语义，这些信息交给上层调用者去维护。下同。
             EnsureKey(key);
 
-            var success = InnerGet(key, null, expiry, out T value);
-            if (success)
-                return value;
+            InnerGet(key, null, expiry, out T value);
 
-            return default(T);
+            return value;
         }
 
         /// <summary>
@@ -136,10 +134,8 @@ namespace LightCache.Remote
             EnsureKey(key);
 
             var res = await InnerGetAsync<T>(key, null, expiry).ConfigureAwait(false);
-            if (res.Success)
-                return (T)res.Value;
 
-            return default(T);
+            return (T)res.Value;
         }
 
         /// <summary>

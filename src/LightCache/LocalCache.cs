@@ -115,11 +115,9 @@ namespace LightCache
         {
             EnsureKey(key);
 
-            var success = InnerGet(key, null, null, null, out T value);
-            if (success)
-                return value;
+            InnerGet(key, null, null, null, out T value);
 
-            return default(T);
+            return value;
         }
 
         /// <summary>
@@ -241,7 +239,6 @@ namespace LightCache
         /// <param name="keys">指定的键集合</param>
         /// <returns>一个字典包含键和对应的值</returns>
         public IDictionary<string, T> GetAll<T>(IEnumerable<string> keys)
-            where T : class
         {
             EnsureNotNull(nameof(keys), keys);
 

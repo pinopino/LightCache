@@ -15,11 +15,10 @@ namespace LightCache
                 throw new ArgumentNullException("缓存键不能为空");
         }
 
-        protected void EnsureNotNull<T>(string name, IEnumerable<T> value)
+        protected void EnsureNotNull<T>(string name, IEnumerable<T> values)
         {
-            EnsureNotNull(name, value);
-            if (!value.Any())
-                throw new InvalidOperationException("提供的集合中含有空项");
+            if (values == null || !values.Any())
+                throw new InvalidOperationException("提供的集合为空或未包含项");
         }
 
         protected void EnsureNotNull(string name, object value)
