@@ -11,12 +11,11 @@ namespace LightCache
     /// <summary>
     /// LightCacher缓存交互接口
     /// </summary>
-    public partial class LightCacher : CacheService, IDisposable
+    public class LightCacher : CacheService, IDisposable
     {
         private volatile int _remote_inited;
         private MemoryCache _cache;
         private RemoteCache _remote;
-        private MultiCache _multi;
         public TimeSpan DefaultExpiry { get; private set; }
         private ConcurrentDictionary<string, SemaphoreSlim> _locks;
 
@@ -38,16 +37,6 @@ namespace LightCache
             }
         }
 
-        public MultiCache Multi
-        {
-            get
-            {
-                if (_remote_inited == 1)
-                    return _multi;
-                throw new InvalidOperationException("RemoteCache还未初始化，请先调用InitRemote函数");
-            }
-        }
-
         /// <summary>
         /// 如果想单独使用remotecache，则先初始化一波
         /// </summary>
@@ -56,11 +45,7 @@ namespace LightCache
             if (Interlocked.Exchange(ref _remote_inited, 1) == 0)
             {
                 if (Remote == null)
-                {
                     Remote = new RemoteCache(host);
-                    // remote被开启之后，其实默认MultiCache也就算开启了
-                    _multi = new MultiCache(this, _remote);
-                }
             }
         }
 
@@ -299,7 +284,7 @@ namespace LightCache
             return true;
         }
 
-        private bool InnerGet<T>(string key, Func<T> valFactory, DateTimeOffset? absExp, TimeSpan? slidingExp, out T value)
+        internal bool InnerGet<T>(string key, Func<T> valFactory, DateTimeOffset? absExp, TimeSpan? slidingExp, out T value)
         {
             // memorycache本身是线程安全的
             var success = _cache.TryGetValue(key, out value);
@@ -335,7 +320,7 @@ namespace LightCache
             return true;
         }
 
-        private async Task<AsyncResult> InnerGetAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset? absExp, TimeSpan? slidingExp)
+        internal async Task<AsyncResult> InnerGetAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset? absExp, TimeSpan? slidingExp)
         {
             // memorycache本身是线程安全的
             var success = _cache.TryGetValue(key, out object value);
@@ -374,7 +359,7 @@ namespace LightCache
             return new AsyncResult { Success = true, Value = value };
         }
 
-        private void InnerSet(string key, object value, DateTimeOffset? absExp, TimeSpan? slidingExp)
+        internal void InnerSet(string key, object value, DateTimeOffset? absExp, TimeSpan? slidingExp)
         {
             MemoryCacheEntryOptions cep = new MemoryCacheEntryOptions();
             cep.Priority = CacheItemPriority.Normal;
