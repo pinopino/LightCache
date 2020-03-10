@@ -483,6 +483,26 @@ namespace LightCache.Remote
             return new AsyncResult { Success = true, Value = JsonConvert.DeserializeObject<T>(res) };
         }
 
+        #region pub/sub支持
+        internal void Subscribe(RedisChannel channel, Action<RedisValue> handler)
+        {
+            EnsureNotNull(nameof(handler), handler);
+
+            var sub = _connector.GetSubscriber();
+            // 事件的顺序不做保证，如果需要请注册channel的onmessage
+            // link: https://stackexchange.github.io/StackExchange.Redis/PubSubOrder
+            sub.Subscribe(channel, (redisChannel, value) => handler(value), CommandFlags.FireAndForget);
+        }
+
+        internal Task PublishAsync(RedisChannel channel, string key)
+        {
+            EnsureKey(key);
+
+            var sub = _connector.GetSubscriber();
+            return sub.PublishAsync(channel, key, CommandFlags.FireAndForget);
+        }
+        #endregion
+
         private IDictionary<string, bool> UpdateExpiryAll(string[] keys, TimeSpan expiry)
         {
             var ret = new Dictionary<string, bool>();

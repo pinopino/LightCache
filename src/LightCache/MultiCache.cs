@@ -1,5 +1,6 @@
 ﻿using LightCache.Common;
 using LightCache.Remote;
+using StackExchange.Redis;
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -15,6 +16,7 @@ namespace LightCache.Multi
         {
             _remote = new RemoteCache(host);
             _local = new LightCacher(capacity, expiration);
+            Subscribe();
         }
 
         /// <summary>
@@ -50,10 +52,10 @@ namespace LightCache.Multi
         /// <returns>true操作成功，否则失败</returns>
         public bool Remove(string key)
         {
-            // 即使本地remove失败也需要尝试remove远程的，
-            // 因此只要不抛出异常就认为是成功，下同
-            _local.Remove(key);
+            // 说明：先删除remote的，尽可能减少缓存不一致的可能
+            // 只要不抛出异常就认为是成功，下同
             _remote.Remove(key);
+            _local.Remove(key);
 
             return true;
         }
@@ -65,8 +67,8 @@ namespace LightCache.Multi
         /// <returns>true操作成功，否则失败</returns>
         public async Task<bool> RemoveAsync(string key)
         {
-            _local.Remove(key);
             await _remote.RemoveAsync(key).ConfigureAwait(false);
+            _local.Remove(key);
 
             return true;
         }
@@ -78,8 +80,8 @@ namespace LightCache.Multi
         /// <returns>true操作成功，否则失败</returns>
         public bool RemoveAll(IEnumerable<string> keys)
         {
-            _local.RemoveAll(keys);
             _remote.RemoveAll(keys);
+            _local.RemoveAll(keys);
 
             return true;
         }
@@ -91,8 +93,8 @@ namespace LightCache.Multi
         /// <returns>true操作成功，否则失败</returns>
         public async Task<bool> RemoveAllAsync(IEnumerable<string> keys)
         {
-            _local.RemoveAll(keys);
             await _remote.RemoveAllAsync(keys).ConfigureAwait(false);
+            _local.RemoveAll(keys);
 
             return true;
         }
@@ -106,7 +108,7 @@ namespace LightCache.Multi
         public T Get<T>(string key, TimeSpan? expiry = null)
         {
             // 说明：
-            // 出于清晰，方便使用的目的，框架设计中对于缓存的刷新的考虑如下：
+            // 出于清晰、方便使用的目的，框架设计中对于缓存的刷新考虑如下：
             // . L1会采用系统默认值设置绝对过期（不包含刷新键生存期动作）；
             // . L2允许全部动作；
             // 下同。
@@ -429,7 +431,30 @@ namespace LightCache.Multi
 
         public void Dispose()
         {
-            throw new NotImplementedException();
+            _local.Dispose();
+            _remote.Dispose();
         }
+
+        #region in-memory更新机制
+        readonly string channel_key = "event:key:changed";
+        readonly string channel_prefix = $"{Environment.MachineName}";
+
+        private void Subscribe()
+        {
+            // link: https://github.com/StackExchange/StackExchange.Redis/issues/859
+            var channel = new RedisChannel(channel_key, RedisChannel.PatternMode.Literal);
+            _remote.Subscribe(channel, p =>
+            {
+                if (!p.StartsWith(channel_prefix))
+                    _local.Remove(p);
+            });
+        }
+
+        public Task NotifyChangeFor(string key)
+        {
+            var channel = new RedisChannel(channel_key, RedisChannel.PatternMode.Literal);
+            return _remote.PublishAsync(channel, $"{channel_prefix}:{key}");
+        }
+        #endregion
     }
 }
