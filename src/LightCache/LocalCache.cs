@@ -1,5 +1,6 @@
 ﻿using LightCache.Remote;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -16,9 +17,16 @@ namespace LightCache
         private volatile int _remote_inited;
         private MemoryCache _cache;
         private RemoteCache _remote;
-        public TimeSpan DefaultExpiry { get; private set; }
         private ConcurrentDictionary<string, SemaphoreSlim> _locks;
 
+        public TimeSpan DefaultExpiry { get; private set; }
+
+        /// <summary>
+        /// 实例化一个lightcacher对象
+        /// </summary>
+        /// <param name="capacity">缓存容量大小</param>
+        /// <param name="expiration">默认滑动过期时间</param>
+        /// <param name="hybirdCache">是否启用二级缓存</param>
         public LightCacher(long? capacity, int expiration = 60)
         {
             DefaultExpiry = TimeSpan.FromSeconds(expiration);
@@ -28,24 +36,21 @@ namespace LightCache
 
         public RemoteCache Remote
         {
-            private set { _remote = value; }
             get
             {
-                if (_remote_inited == 1)
-                    return _remote;
-                throw new InvalidOperationException("RemoteCache还未初始化，请先调用InitRemote函数");
-            }
-        }
-
-        /// <summary>
-        /// 如果想单独使用remotecache，则先初始化一波
-        /// </summary>
-        public void InitRemote(string host)
-        {
-            if (Interlocked.Exchange(ref _remote_inited, 1) == 0)
-            {
-                if (Remote == null)
-                    Remote = new RemoteCache(host);
+                if (Interlocked.Exchange(ref _remote_inited, 1) == 0)
+                {
+                    if (_remote == null)
+                    {
+                        var builder = new ConfigurationBuilder()
+                            .SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
+                            .AddJsonFile("appsettings.json");
+                        var configuration = builder.Build();
+                        var host = configuration.GetSection("LightCache:RemoteHost").Value;
+                        _remote = new RemoteCache(host);
+                    }
+                }
+                return _remote;
             }
         }
 
@@ -95,12 +100,32 @@ namespace LightCache
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
-        /// <returns>若存在返回对应项，否则返回T类型的默认值</returns>
-        public T Get<T>(string key)
+        /// <param name="defaultVal">当键不存在时返回的指定值</param>
+        /// <returns>若存在返回对应项，否则返回给定的默认值</returns>
+        public T Get<T>(string key, T defaultVal = default)
         {
             EnsureKey(key);
 
-            InnerGet(key, null, null, null, out T value);
+            if (InnerGet(key, null, null, null, null, out T value))
+                return value;
+
+            return defaultVal;
+        }
+
+        /// <summary>
+        /// 获取指定key对应的缓存项，若不存在则填入valFactory产生的值并设定默认的滑动过期时间
+        /// </summary>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="key">指定的键</param>
+        /// <param name="valFactory">缓存值的构造factory</param>
+        /// <param name="priority">缓存项的优先级</param>
+        /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
+        public T GetOrAdd<T>(string key, Func<Task<T>> valFactory, CacheItemPriority priority = CacheItemPriority.Normal)
+        {
+            EnsureKey(key);
+            EnsureNotNull(nameof(valFactory), valFactory);
+
+            InnerGet(key, valFactory, null, DefaultExpiry, priority, out T value);
 
             return value;
         }
@@ -112,13 +137,14 @@ namespace LightCache
         /// <param name="key">指定的键</param>
         /// <param name="valFactory">缓存值的构造factory</param>
         /// <param name="absExp">绝对过期时间</param>
+        /// <param name="priority">缓存项的优先级</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public T GetOrAdd<T>(string key, Func<T> valFactory, DateTimeOffset? absExp = null)
+        public T GetOrAdd<T>(string key, Func<Task<T>> valFactory, DateTimeOffset absExp, CacheItemPriority priority = CacheItemPriority.Normal)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            InnerGet(key, valFactory, GetDefaultFor(absExp), null, out T value);
+            InnerGet(key, valFactory, absExp, null, priority, out T value);
 
             return value;
         }
@@ -129,16 +155,36 @@ namespace LightCache
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="valFactory">缓存值的构造factory</param>
-        /// <param name="absExp">滑动过期时间</param>
+        /// <param name="slidingExp">滑动过期时间</param>
+        /// <param name="priority">缓存项的优先级</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public T GetOrAdd<T>(string key, Func<T> valFactory, TimeSpan? slidingExp = null)
+        public T GetOrAdd<T>(string key, Func<Task<T>> valFactory, TimeSpan slidingExp, CacheItemPriority priority = CacheItemPriority.Normal)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            InnerGet(key, valFactory, null, slidingExp ?? DefaultExpiry, out T value);
+            InnerGet(key, valFactory, null, slidingExp, priority, out T value);
 
             return value;
+        }
+
+        /// <summary>
+        /// 异步获取指定key对应的缓存项，若不存在则填入valFactory产生的值并设定默认的滑动过期时间
+        /// </summary>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="key">指定的键</param>
+        /// <param name="valFactory">缓存值的构造factory</param>
+        /// <param name="priority">缓存项的优先级</param>
+        /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
+        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, CacheItemPriority priority = CacheItemPriority.Normal)
+        {
+            EnsureKey(key);
+            EnsureNotNull(nameof(valFactory), valFactory);
+
+            var res = await InnerGetAsync(key, valFactory, null, DefaultExpiry, priority)
+                .ConfigureAwait(false);
+
+            return res.Value;
         }
 
         /// <summary>
@@ -148,16 +194,17 @@ namespace LightCache
         /// <param name="key">指定的键</param>
         /// <param name="valFactory">缓存值的构造factory</param>
         /// <param name="absExp">绝对过期时间</param>
+        /// <param name="priority">缓存项的优先级</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset? absExp = null)
+        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset absExp, CacheItemPriority priority = CacheItemPriority.Normal)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            var res = await InnerGetAsync(key, valFactory, GetDefaultFor(absExp), null)
+            var res = await InnerGetAsync(key, valFactory, absExp, null, priority)
                 .ConfigureAwait(false);
 
-            return (T)res.Value;
+            return res.Value;
         }
 
         /// <summary>
@@ -167,16 +214,17 @@ namespace LightCache
         /// <param name="key">指定的键</param>
         /// <param name="valFactory">缓存值的构造factory</param>
         /// <param name="slidingExp">滑动过期时间</param>
+        /// <param name="priority">缓存项的优先级</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan? slidingExp = null)
+        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan slidingExp, CacheItemPriority priority = CacheItemPriority.Normal)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            var res = await InnerGetAsync(key, valFactory, null, slidingExp ?? DefaultExpiry)
+            var res = await InnerGetAsync(key, valFactory, null, slidingExp, priority)
                 .ConfigureAwait(false);
 
-            return (T)res.Value;
+            return res.Value;
         }
 
         /// <summary>
@@ -185,10 +233,11 @@ namespace LightCache
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="value">要缓存的值</param>
-        public void Add<T>(string key, T value)
+        /// <param name="priority">缓存项的优先级</param>
+        public void Add<T>(string key, T value, CacheItemPriority priority = CacheItemPriority.Normal)
         {
             EnsureKey(key);
-            InnerSet(key, value, null, DefaultExpiry);
+            InnerSet(key, value, null, DefaultExpiry, priority);
         }
 
         /// <summary>
@@ -198,10 +247,11 @@ namespace LightCache
         /// <param name="key">指定的键</param>
         /// <param name="value">要缓存的值</param>
         /// <param name="absExp">绝对过期时间</param>
-        public void Add<T>(string key, T value, DateTimeOffset? absExp = null)
+        /// <param name="priority">缓存项的优先级</param>
+        public void Add<T>(string key, T value, DateTimeOffset absExp, CacheItemPriority priority = CacheItemPriority.Normal)
         {
             EnsureKey(key);
-            InnerSet(key, value, GetDefaultFor(absExp), null);
+            InnerSet(key, value, absExp, null, priority);
         }
 
         /// <summary>
@@ -211,10 +261,11 @@ namespace LightCache
         /// <param name="key">指定的键</param>
         /// <param name="value">要缓存的值</param>
         /// <param name="slidingExp">滑动过期时间</param>
-        public void Add<T>(string key, T value, TimeSpan? slidingExp = null)
+        /// <param name="priority">缓存项的优先级</param>
+        public void Add<T>(string key, T value, TimeSpan slidingExp, CacheItemPriority priority = CacheItemPriority.Normal)
         {
             EnsureKey(key);
-            InnerSet(key, value, null, slidingExp ?? DefaultExpiry);
+            InnerSet(key, value, null, slidingExp, priority);
         }
 
         /// <summary>
@@ -222,16 +273,20 @@ namespace LightCache
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="keys">指定的键集合</param>
+        /// <param name="defaultVal">当键不存在时返回的指定值</param>
+        /// <param name="priority">缓存项的优先级</param>
         /// <returns>一个字典包含键和对应的值</returns>
-        public IDictionary<string, T> GetAll<T>(IEnumerable<string> keys)
+        public IDictionary<string, T> GetAll<T>(IEnumerable<string> keys, T defaultVal = default, CacheItemPriority priority = CacheItemPriority.Normal)
         {
             EnsureNotNull(nameof(keys), keys);
 
             var ret = new Dictionary<string, T>();
             foreach (var key in keys)
             {
-                InnerGet(key, null, null, null, out T value);
-                ret[key] = value;
+                if (InnerGet(key, null, null, null, priority, out T value))
+                    ret[key] = value;
+                else
+                    ret[key] = defaultVal;
             }
 
             return ret;
@@ -242,10 +297,11 @@ namespace LightCache
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="items">要缓存的键值集合</param>
+        /// <param name="priority">缓存项的优先级</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool AddAll<T>(IDictionary<string, T> items)
+        public bool AddAll<T>(IDictionary<string, T> items, CacheItemPriority priority = CacheItemPriority.Normal)
         {
-            return AddAll(items, DefaultExpiry);
+            return AddAll(items, DefaultExpiry, priority);
         }
 
         /// <summary>
@@ -254,14 +310,14 @@ namespace LightCache
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="items">要缓存的键值集合</param>
         /// <param name="absExp">绝对过期时间</param>
+        /// <param name="priority">缓存项的优先级</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool AddAll<T>(IDictionary<string, T> items, DateTimeOffset? absExp = null)
+        public bool AddAll<T>(IDictionary<string, T> items, DateTimeOffset absExp, CacheItemPriority priority = CacheItemPriority.Normal)
         {
             EnsureNotNull(nameof(items), items);
 
-            var abs = GetDefaultFor(absExp);
             foreach (var key in items.Keys)
-                InnerSet(key, items[key], abs, null);
+                InnerSet(key, items[key], absExp, null, priority);
 
             return true;
         }
@@ -272,19 +328,19 @@ namespace LightCache
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="items">要缓存的键值集合</param>
         /// <param name="slidingExp">滑动过期时间</param>
+        /// <param name="priority">缓存项的优先级</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool AddAll<T>(IDictionary<string, T> items, TimeSpan? slidingExp = null)
+        public bool AddAll<T>(IDictionary<string, T> items, TimeSpan slidingExp, CacheItemPriority priority = CacheItemPriority.Normal)
         {
             EnsureNotNull(nameof(items), items);
 
-            var span = slidingExp ?? DefaultExpiry;
             foreach (var key in items.Keys)
-                InnerSet(key, items[key], null, span);
+                InnerSet(key, items[key], null, slidingExp, priority);
 
             return true;
         }
 
-        internal bool InnerGet<T>(string key, Func<T> valFactory, DateTimeOffset? absExp, TimeSpan? slidingExp, out T value)
+        internal bool InnerGet<T>(string key, Func<Task<T>> valFactory, DateTimeOffset? absExp, TimeSpan? slidingExp, CacheItemPriority? priority, out T value)
         {
             // memorycache本身是线程安全的
             var success = _cache.TryGetValue(key, out value);
@@ -295,41 +351,34 @@ namespace LightCache
                     value = default(T);
                     return false;
                 }
+                value = valFactory().Result;
 
-                lock (string.Intern($"___cache_key_{key}")) // key处理下，避免意外lock
-                {
-                    success = _cache.TryGetValue(key, out value);
-                    if (!success)
-                    {
-                        value = valFactory();
+                MemoryCacheEntryOptions cep = new MemoryCacheEntryOptions();
+                cep.SetSize(1);
+                if (priority.HasValue)
+                    cep.Priority = priority.Value;
+                if (absExp.HasValue)
+                    cep.AbsoluteExpiration = absExp.Value;
+                if (slidingExp.HasValue)
+                    cep.SlidingExpiration = slidingExp.Value;
 
-                        MemoryCacheEntryOptions cep = new MemoryCacheEntryOptions();
-                        cep.Priority = CacheItemPriority.Normal;
-                        cep.SetSize(1);
-                        if (absExp.HasValue)
-                            cep.AbsoluteExpiration = absExp.Value;
-                        if (slidingExp.HasValue)
-                            cep.SlidingExpiration = slidingExp.Value;
-
-                        _cache.Set(key, value, cep);
-                        return true;
-                    }
-                }
+                _cache.Set(key, value, cep);
+                return true;
             }
 
             return true;
         }
 
-        internal async Task<AsyncResult> InnerGetAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset? absExp, TimeSpan? slidingExp)
+        internal async Task<AsyncResult<T>> InnerGetAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset? absExp, TimeSpan? slidingExp, CacheItemPriority? priority)
         {
             // memorycache本身是线程安全的
-            var success = _cache.TryGetValue(key, out object value);
+            var success = _cache.TryGetValue(key, out T value);
             if (!success)
             {
                 if (valFactory == null)
-                    return new AsyncResult { Success = false, Value = default(T) };
+                    return new AsyncResult<T> { Success = false, Value = default };
 
-                var mylock = _locks.GetOrAdd(key, k => new SemaphoreSlim(1, 1));
+                var mylock = _locks.GetOrAdd(key, k => new SemaphoreSlim(1, 1)); // TODO：_locks小心内存泄露
                 await mylock.WaitAsync();
                 try
                 {
@@ -339,15 +388,16 @@ namespace LightCache
                         value = await valFactory();
 
                         MemoryCacheEntryOptions cep = new MemoryCacheEntryOptions();
-                        cep.Priority = CacheItemPriority.Normal;
                         cep.SetSize(1);
+                        if (priority.HasValue)
+                            cep.Priority = priority.Value;
                         if (absExp.HasValue)
                             cep.AbsoluteExpiration = absExp.Value;
                         if (slidingExp.HasValue)
                             cep.SlidingExpiration = slidingExp.Value;
 
                         _cache.Set(key, value, cep);
-                        return new AsyncResult { Success = true, Value = value };
+                        return new AsyncResult<T> { Success = true, Value = value };
                     }
                 }
                 finally
@@ -356,15 +406,15 @@ namespace LightCache
                 }
             }
 
-            return new AsyncResult { Success = true, Value = value };
+            return new AsyncResult<T> { Success = true, Value = value };
         }
 
-        internal void InnerSet(string key, object value, DateTimeOffset? absExp, TimeSpan? slidingExp)
+        internal void InnerSet(string key, object value, DateTimeOffset? absExp, TimeSpan? slidingExp, CacheItemPriority? priority)
         {
             MemoryCacheEntryOptions cep = new MemoryCacheEntryOptions();
-            cep.Priority = CacheItemPriority.Normal;
             cep.SetSize(1);
-
+            if (priority.HasValue)
+                cep.Priority = priority.Value;
             if (absExp.HasValue)
                 cep.AbsoluteExpiration = absExp.Value;
             if (slidingExp.HasValue)

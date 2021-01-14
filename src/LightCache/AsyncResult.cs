@@ -4,9 +4,9 @@ using System.Text;
 
 namespace LightCache
 {
-    public class AsyncResult
+    public class AsyncResult<T>
     {
         public bool Success;
-        public object Value;
+        public T Value;
     }
 }
