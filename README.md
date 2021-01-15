@@ -9,13 +9,13 @@
 库在设计上考虑了两种使用场景，一种是常见的单机单应用。此种情况下你既可以使用本地缓存也可以使用远程缓存（比如你就是很喜欢redis）：
 - 本地
   ```csharp
-  LightCacher cache = new LightCacher(1024);
+  LightCache cache = new LightCache(1024);
   cache.Add(obj);
   ```
 
 - remote
   ```csharp
-  LightCacher cache = new LightCacher(1024);
+  LightCache cache = new LightCache(1024);
   cache.Remote.Add(obj);
   ```
 
@@ -27,11 +27,11 @@
 - 更新（下面会描述）
 - 缓存穿透，两种处理方式：
   - 直接用null或者其它某个特殊值表达
-  - 查询缓存前对key做过滤（bitmap，布隆过滤器）
+  - 查询缓存前对key做过滤（range，bitmap，布隆过滤器）
 - 缓存击穿（针对热点数据）\
-  主要是一个并发控制。目的就一个防止键miss的时候大量请求打到数据库上，这在多级缓存的情况下要考虑的就是main cache（redis）的并发控制，有两种方式：
+  主要是一个并发控制。目的就一个，防止键miss的时候大量请求打到数据库上。这在多级缓存的情况下要考虑的就是main cache（redis）的并发控制，有两种方式：
   - stackexchange.redis提供的`LockTake`/`LockRelease`方法组
-  - 如果redis使用的集群配置，那么可以使用redlock，.net 这边有现成的实现
+  - 如果redis使用的集群配置，那么可以使用`redlock`，.net 这边有现成的实现
   > 你可能想要使用redis提供的`WATCH`搞一个乐观锁，很遗憾这是并不行的。原因就在于此种方式下乐观锁体中一部分请求逻辑还是会被所有并发客户端执行的，并不能起到保护数据库的作用。
 - 缓存雪崩\
   多级缓存一定程度上能够缓解这个问题；另外，过期时间随机一个范围可能会好点（应用层去决定这个时间要好点，库只需要提供支持方法即可）
@@ -44,19 +44,19 @@
 | Remote | 正常更新 | --- |
 | Hybird  | --- | self -> 正常更新 <br> other -> redis pub/sub |
 
-对于第三种情况，框架提供了通知方法，你可以在完成一次数据库修改动作之后调用：
+对于第三种情况，库提供了通知方法，你可以在完成一次数据库修改动作之后调用：
 ```csharp
 cache.NotifyChangeFor(key);
 ```
 注意这里面多个事件的发生顺序：
 1. self更新：删除remote -> 删除in-mem
 2. 发送通知
-3. other更新：删除remot -> 删除in-mem
+3. other更新：删除in-mem
 
 #### 使用
 在api的设计上有考虑过像上面`remote`那样的方式，比如：
 ```csharp
-LightCacher cache = new LightCacher(1024);
+LightCache cache = new LightCache(1024);
 cache.InitRemote(); // 初始化remote之后，相当于也就激活了多级缓存
 cache.Mutil.Add(obj);
 ```

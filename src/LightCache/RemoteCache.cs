@@ -120,7 +120,7 @@ namespace LightCache.Remote
         {
             EnsureKey(key);
 
-            if (InnerGet(key, null, null, out T value, isSlidingExp))
+            if (InnerGet(key, null, false, null, out T value, isSlidingExp))
                 return value;
 
             return defaultVal;
@@ -138,7 +138,7 @@ namespace LightCache.Remote
         {
             EnsureKey(key);
 
-            var res = await InnerGetAsync<T>(key, null, null, isSlidingExp).ConfigureAwait(false);
+            var res = await InnerGetAsync<T>(key, null, false, null, isSlidingExp).ConfigureAwait(false);
             if (res.Success)
                 return res.Value;
 
@@ -157,7 +157,7 @@ namespace LightCache.Remote
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            InnerGet(key, valFactory, null, out T value);
+            InnerGet(key, valFactory, false, null, out T value);
 
             return value;
         }
@@ -175,7 +175,7 @@ namespace LightCache.Remote
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            InnerGet(key, valFactory, expiresAt.ToTimeSpan(), out T value, false);
+            InnerGet(key, valFactory, false, expiresAt.ToTimeSpan(), out T value, false);
 
             return value;
         }
@@ -193,7 +193,7 @@ namespace LightCache.Remote
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            InnerGet(key, valFactory, expiresIn, out T value, true);
+            InnerGet(key, valFactory, false, expiresIn, out T value, true);
 
             return value;
         }
@@ -210,7 +210,7 @@ namespace LightCache.Remote
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            var res = await InnerGetAsync(key, valFactory, null).ConfigureAwait(false);
+            var res = await InnerGetAsync(key, valFactory, false, null).ConfigureAwait(false);
 
             return res.Value;
         }
@@ -228,7 +228,7 @@ namespace LightCache.Remote
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            var res = await InnerGetAsync(key, valFactory, expiresAt.ToTimeSpan()).ConfigureAwait(false);
+            var res = await InnerGetAsync(key, valFactory, false, expiresAt.ToTimeSpan()).ConfigureAwait(false);
 
             return res.Value;
         }
@@ -246,7 +246,7 @@ namespace LightCache.Remote
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            var res = await InnerGetAsync(key, valFactory, expiresIn, true).ConfigureAwait(false);
+            var res = await InnerGetAsync(key, valFactory, false, expiresIn, true).ConfigureAwait(false);
 
             return res.Value;
         }
@@ -515,7 +515,7 @@ namespace LightCache.Remote
             return ret;
         }
 
-        internal bool InnerGet<T>(string key, Func<Task<T>> valFactory, TimeSpan? expiry, out T value, bool isSlidingExp = false)
+        internal bool InnerGet<T>(string key, Func<Task<T>> valFactory, bool useLock, TimeSpan? expiry, out T value, bool isSlidingExp = false)
         {
             // 说明：
             // 这里有一个get-and-set，取决于具体场景在某些情况下是有可能存在race condition的。
@@ -543,9 +543,18 @@ namespace LightCache.Remote
                     value = default;
                     return false;
                 }
-                value = valFactory().Result;
 
-                return _db.StringSet(key, JsonConvert.SerializeObject(value), expiry, When.NotExists);
+                if (!useLock)
+                {
+                    value = valFactory().Result;
+                    return _db.StringSet(key, JsonConvert.SerializeObject(value), expiry, When.NotExists);
+                }
+                else
+                {
+                    var ret = RetryWithLock(key, valFactory, expiry);
+                    value = ret.value;
+                    return ret.success;
+                }
             }
 
             if (isSlidingExp)
@@ -559,7 +568,7 @@ namespace LightCache.Remote
             return true;
         }
 
-        internal async Task<AsyncResult<T>> InnerGetAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan? expiry, bool isSlidingExp = false)
+        internal async Task<AsyncResult<T>> InnerGetAsync<T>(string key, Func<Task<T>> valFactory, bool useLock, TimeSpan? expiry, bool isSlidingExp = false)
         {
             TimeSpan? exp = default;
             RedisValue val;
@@ -580,9 +589,17 @@ namespace LightCache.Remote
                 if (valFactory == null)
                     return new AsyncResult<T> { Success = false, Value = default };
 
-                var value = await valFactory();
-                var success = await _db.StringSetAsync(key, JsonConvert.SerializeObject(value), expiry, When.NotExists);
-                return new AsyncResult<T> { Success = success, Value = value };
+                if (!useLock)
+                {
+                    var value = await valFactory();
+                    var success = await _db.StringSetAsync(key, JsonConvert.SerializeObject(value), expiry, When.NotExists);
+                    return new AsyncResult<T> { Success = success, Value = value };
+                }
+                else
+                {
+                    var ret = await RetryWithLockAsync(key, valFactory, expiry);
+                    return new AsyncResult<T> { Success = ret.success, Value = ret.value };
+                }
             }
 
             if (isSlidingExp)
@@ -606,6 +623,75 @@ namespace LightCache.Remote
             for (var i = 0; i < keys.Length; i++)
                 _db.KeyExpireAsync(keys[i], expiresIn, CommandFlags.FireAndForget);
         }
+
+        #region lock
+        private TimeSpan _lockTimeout;
+        // link：https://stackoverflow.com/questions/25127172/stackexchange-redis-locktake-lockrelease-usage
+        private (bool success, T value) RetryWithLock<T>(string key, Func<Task<T>> valFactory, TimeSpan? expiry)
+        {
+            var lockName = $"{key}_lock___";
+            var lockToken = Environment.MachineName;
+            var count = 0;
+            while (count < 5)
+            {
+                //check for access to cache object, trying to lock it
+                if (!_db.LockTake(lockName, lockToken, _lockTimeout))
+                {
+                    count++;
+                    Thread.Sleep(100); //sleep for 100 milliseconds for next lock try. you can play with that
+                    continue;
+                }
+
+                var res = _db.StringGet(key);
+                if (res.HasValue)
+                    return (true, JsonConvert.DeserializeObject<T>(res));
+
+                try
+                {
+                    var val = valFactory().Result;
+                    return (_db.StringSet(key, JsonConvert.SerializeObject(val), expiry, When.NotExists), val);
+                }
+                finally
+                {
+                    _db.LockRelease(lockName, lockToken);
+                }
+            }
+
+            return (false, default);
+        }
+
+        private async Task<(bool success, T value)> RetryWithLockAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan? expiry)
+        {
+            var lockName = $"{key}_lock___";
+            var lockToken = Environment.MachineName;
+            var count = 0;
+            while (count < 5)
+            {
+                if (!_db.LockTake(lockName, lockToken, _lockTimeout))
+                {
+                    count++;
+                    Thread.Sleep(100);
+                    continue;
+                }
+
+                var res = await _db.StringGetAsync(key);
+                if (res.HasValue)
+                    return (true, JsonConvert.DeserializeObject<T>(res));
+
+                try
+                {
+                    var val = await valFactory();
+                    return (await _db.StringSetAsync(key, JsonConvert.SerializeObject(val), expiry, When.NotExists), val);
+                }
+                finally
+                {
+                    _db.LockRelease(lockName, lockToken);
+                }
+            }
+
+            return (false, default);
+        }
+        #endregion
 
         #region Pub/Sub支持
         internal void Subscribe(RedisChannel channel, Action<RedisValue> handler)

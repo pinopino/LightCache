@@ -118,7 +118,8 @@ namespace LightCache.Hybird
             var success = _local.InnerGet(key, null, null, null, null, out T value);
             if (!success)
             {
-                success = _remote.InnerGet(key, null, null, out value, isSlidingExp);
+                success = _remote.InnerGet(key, null, true/*这里真假无所谓，因为factory为null的*/,
+                    null, out value, isSlidingExp);
                 if (success)
                 {
                     _local.Add(key, value);
@@ -145,7 +146,8 @@ namespace LightCache.Hybird
             var success = _local.InnerGet(key, null, null, null, null, out T value);
             if (!success)
             {
-                var asyncRes = await _remote.InnerGetAsync<T>(key, null, null, isSlidingExp);
+                var asyncRes = await _remote.InnerGetAsync<T>(key, null, true/*这里真假无所谓，因为factory为null的*/,
+                    null, isSlidingExp);
                 if (asyncRes.Success)
                 {
                     _local.Add(key, asyncRes.Value);
@@ -171,7 +173,7 @@ namespace LightCache.Hybird
             var success = _local.InnerGet(key, null, null, null, null, out T value);
             if (!success)
             {
-                success = _remote.InnerGet(key, valFactory, null, out value);
+                success = _remote.InnerGet(key, valFactory, true, null, out value);
                 if (success)
                     _local.Add(key, value);
             }
@@ -195,7 +197,7 @@ namespace LightCache.Hybird
             var success = _local.InnerGet(key, null, null, null, null, out T value);
             if (!success)
             {
-                success = _remote.InnerGet(key, valFactory, expiresAt.ToTimeSpan(), out value);
+                success = _remote.InnerGet(key, valFactory, true, expiresAt.ToTimeSpan(), out value);
                 if (success)
                     _local.Add(key, value);
             }
@@ -219,7 +221,7 @@ namespace LightCache.Hybird
             var success = _local.InnerGet(key, null, null, null, null, out T value);
             if (!success)
             {
-                success = _remote.InnerGet(key, valFactory, expiresIn, out value);
+                success = _remote.InnerGet(key, valFactory, true, expiresIn, out value);
                 if (success)
                     _local.Add(key, value);
             }
@@ -242,7 +244,7 @@ namespace LightCache.Hybird
             var success = _local.InnerGet(key, null, null, null, null, out T value);
             if (!success)
             {
-                var asyncRes = await _remote.InnerGetAsync(key, valFactory, null);
+                var asyncRes = await _remote.InnerGetAsync(key, valFactory, true, null);
                 value = asyncRes.Value;
                 if (asyncRes.Success)
                     _local.Add(key, value);
@@ -267,7 +269,7 @@ namespace LightCache.Hybird
             var success = _local.InnerGet(key, null, null, null, null, out T value);
             if (!success)
             {
-                var asyncRes = await _remote.InnerGetAsync(key, valFactory, expiresAt.ToTimeSpan());
+                var asyncRes = await _remote.InnerGetAsync(key, valFactory, true, expiresAt.ToTimeSpan());
                 value = asyncRes.Value;
                 if (asyncRes.Success)
                     _local.Add(key, value);
@@ -292,7 +294,7 @@ namespace LightCache.Hybird
             var success = _local.InnerGet(key, null, null, null, null, out T value);
             if (!success)
             {
-                var asyncRes = await _remote.InnerGetAsync(key, valFactory, expiresIn, true);
+                var asyncRes = await _remote.InnerGetAsync(key, valFactory, true, expiresIn, true);
                 value = asyncRes.Value;
                 if (asyncRes.Success)
                     _local.Add(key, value);
@@ -409,7 +411,8 @@ namespace LightCache.Hybird
                 var success = _local.InnerGet(key, null, null, null, null, out T value);
                 if (!success)
                 {
-                    success = _remote.InnerGet(key, null, null, out value, isSlidingExp);
+                    success = _remote.InnerGet(key, null, true/*这里真假无所谓，因为factory为null的*/,
+                        null, out value, isSlidingExp);
                     if (success)
                     {
                         _local.Add(key, value);
@@ -441,7 +444,8 @@ namespace LightCache.Hybird
                 var success = _local.InnerGet(key, null, null, null, null, out T value);
                 if (!success)
                 {
-                    var asyncRes = await _remote.InnerGetAsync<T>(key, null, null, isSlidingExp);
+                    var asyncRes = await _remote.InnerGetAsync<T>(key, null, true/*这里真假无所谓，因为factory为null的*/,
+                        null, isSlidingExp);
                     value = asyncRes.Value;
                     if (asyncRes.Success)
                     {
