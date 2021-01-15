@@ -3,20 +3,22 @@ using LightCache.Remote;
 using StackExchange.Redis;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading.Tasks;
 
 namespace LightCache.Hybird
 {
+    /// <summary>
+    /// 混合缓存，同时包含一级本地缓存和二级远程缓存
+    /// </summary>
     public sealed class HybirdCache : CacheService, IDisposable
     {
-        LightCacher _local;
+        LightCache _local;
         RemoteCache _remote;
 
         public HybirdCache(string host, long? capacity, int expiration = 60)
         {
             _remote = new RemoteCache(host);
-            _local = new LightCacher(capacity, expiration);
+            _local = new LightCache(capacity, expiration);
             Subscribe();
         }
 
@@ -183,9 +185,9 @@ namespace LightCache.Hybird
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="valFactory">缓存值的构造factory</param>
-        /// <param name="expiryAt">绝对过期时间</param>
+        /// <param name="expiresAt">绝对过期时间</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public T GetOrAdd<T>(string key, Func<Task<T>> valFactory, DateTimeOffset expiryAt)
+        public T GetOrAdd<T>(string key, Func<Task<T>> valFactory, DateTimeOffset expiresAt)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
@@ -193,7 +195,7 @@ namespace LightCache.Hybird
             var success = _local.InnerGet(key, null, null, null, null, out T value);
             if (!success)
             {
-                success = _remote.InnerGet(key, valFactory, expiryAt.ToTimeSpan(), out value);
+                success = _remote.InnerGet(key, valFactory, expiresAt.ToTimeSpan(), out value);
                 if (success)
                     _local.Add(key, value);
             }
@@ -207,9 +209,9 @@ namespace LightCache.Hybird
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="valFactory">缓存值的构造factory</param>
-        /// <param name="expiryIn">滑动过期时间</param>
+        /// <param name="expiresIn">滑动过期时间</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public T GetOrAdd<T>(string key, Func<Task<T>> valFactory, TimeSpan expiryIn)
+        public T GetOrAdd<T>(string key, Func<Task<T>> valFactory, TimeSpan expiresIn)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
@@ -217,7 +219,7 @@ namespace LightCache.Hybird
             var success = _local.InnerGet(key, null, null, null, null, out T value);
             if (!success)
             {
-                success = _remote.InnerGet(key, valFactory, expiryIn, out value);
+                success = _remote.InnerGet(key, valFactory, expiresIn, out value);
                 if (success)
                     _local.Add(key, value);
             }
@@ -255,9 +257,9 @@ namespace LightCache.Hybird
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="valFactory">缓存值的构造factory</param>
-        /// <param name="expiryAt">绝对过期时间</param>
+        /// <param name="expiresAt">绝对过期时间</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset expiryAt)
+        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset expiresAt)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
@@ -265,7 +267,7 @@ namespace LightCache.Hybird
             var success = _local.InnerGet(key, null, null, null, null, out T value);
             if (!success)
             {
-                var asyncRes = await _remote.InnerGetAsync(key, valFactory, expiryAt.ToTimeSpan());
+                var asyncRes = await _remote.InnerGetAsync(key, valFactory, expiresAt.ToTimeSpan());
                 value = asyncRes.Value;
                 if (asyncRes.Success)
                     _local.Add(key, value);
@@ -280,9 +282,9 @@ namespace LightCache.Hybird
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="valFactory">缓存值的构造factory</param>
-        /// <param name="expiryIn">滑动过期时间</param>
+        /// <param name="expiresIn">滑动过期时间</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan expiryIn)
+        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan expiresIn)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
@@ -290,7 +292,7 @@ namespace LightCache.Hybird
             var success = _local.InnerGet(key, null, null, null, null, out T value);
             if (!success)
             {
-                var asyncRes = await _remote.InnerGetAsync(key, valFactory, expiryIn, true);
+                var asyncRes = await _remote.InnerGetAsync(key, valFactory, expiresIn, true);
                 value = asyncRes.Value;
                 if (asyncRes.Success)
                     _local.Add(key, value);
@@ -320,12 +322,13 @@ namespace LightCache.Hybird
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="value">要缓存的值</param>
-        /// <param name="expiryAt">绝对过期时间</param>
+        /// <param name="expiresAt">绝对过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool Add<T>(string key, T value, DateTimeOffset expiryAt)
+        public bool Add<T>(string key, T value, DateTimeOffset expiresAt)
         {
-            // 说明：expiryAt转成timespan并不影响，这里不关心过期语义语义
-            return Add(key, value, expiryAt.ToTimeSpan());
+            // 说明：expiresAt转成timespan并不影响，这里不关心过期语义
+            // 下同。
+            return Add(key, value, expiresAt.ToTimeSpan());
         }
 
         /// <summary>
@@ -334,12 +337,12 @@ namespace LightCache.Hybird
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="value">要缓存的值</param>
-        /// <param name="expiryIn">滑动过期时间</param>
+        /// <param name="expiresIn">滑动过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool Add<T>(string key, T value, TimeSpan expiryIn)
+        public bool Add<T>(string key, T value, TimeSpan expiresIn)
         {
             _local.Add(key, value);
-            _remote.Add(key, value, expiryIn);
+            _remote.Add(key, value, expiresIn);
 
             return true;
         }
@@ -365,11 +368,11 @@ namespace LightCache.Hybird
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="value">要缓存的值</param>
-        /// <param name="expiryAt">绝对过期时间</param>
+        /// <param name="expiresAt">绝对过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public Task<bool> AddAsync<T>(string key, T value, DateTimeOffset expiryAt)
+        public Task<bool> AddAsync<T>(string key, T value, DateTimeOffset expiresAt)
         {
-            return AddAsync(key, value, expiryAt.ToTimeSpan());
+            return AddAsync(key, value, expiresAt.ToTimeSpan());
         }
 
         /// <summary>
@@ -378,12 +381,12 @@ namespace LightCache.Hybird
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="value">要缓存的值</param>
-        /// <param name="expiryIn">滑动过期时间</param>
+        /// <param name="expiresIn">滑动过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public async Task<bool> AddAsync<T>(string key, T value, TimeSpan expiryIn)
+        public async Task<bool> AddAsync<T>(string key, T value, TimeSpan expiresIn)
         {
-            _local.Add(key, value, expiryIn);
-            await _remote.AddAsync(key, value, expiryIn);
+            _local.Add(key, value, expiresIn);
+            await _remote.AddAsync(key, value, expiresIn);
 
             return true;
         }
@@ -394,6 +397,7 @@ namespace LightCache.Hybird
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="keys">指定的键集合</param>
         /// <param name="defaultVal">当键不存在时返回的指定值</param>
+        /// <param name="isSlidingExp">指定的键是否是滑动过期的</param>
         /// <returns>一个字典包含键和对应的值</returns>
         public IDictionary<string, T> GetAll<T>(IEnumerable<string> keys, T defaultVal = default, bool isSlidingExp = false)
         {
@@ -424,7 +428,8 @@ namespace LightCache.Hybird
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="keys">指定的键集合</param>
-        /// <param name="expiry">通过指定expiry以刷新缓存项的过期时间</param>
+        /// <param name="defaultVal">当键不存在时返回的指定值</param>
+        /// <param name="isSlidingExp">指定的键是否是滑动过期的</param>
         /// <returns>一个字典包含键和对应的值</returns>
         public async Task<IDictionary<string, T>> GetAllAsync<T>(IEnumerable<string> keys, T defaultVal = default, bool isSlidingExp = false)
         {
@@ -470,11 +475,11 @@ namespace LightCache.Hybird
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="items">要缓存的键值集合</param>
-        /// <param name="expiryAt">绝对过期时间</param>
+        /// <param name="expiresAt">绝对过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool AddAll<T>(IDictionary<string, T> items, DateTimeOffset expiryAt)
+        public bool AddAll<T>(IDictionary<string, T> items, DateTimeOffset expiresAt)
         {
-            return AddAll(items, expiryAt.ToTimeSpan());
+            return AddAll(items, expiresAt.ToTimeSpan());
         }
 
         /// <summary>
@@ -482,12 +487,12 @@ namespace LightCache.Hybird
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="items">要缓存的键值集合</param>
-        /// <param name="expiryAt">滑动过期时间</param>
+        /// <param name="expiresAt">滑动过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool AddAll<T>(IDictionary<string, T> items, TimeSpan expiryIn)
+        public bool AddAll<T>(IDictionary<string, T> items, TimeSpan expiresIn)
         {
-            _local.AddAll(items, expiryIn);
-            _remote.AddAll(items, expiryIn);
+            _local.AddAll(items, expiresIn);
+            _remote.AddAll(items, expiresIn);
 
             return true;
         }
@@ -511,11 +516,11 @@ namespace LightCache.Hybird
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="items">要缓存的键值集合</param>
-        /// <param name="expiryAt">绝对过期时间</param>
+        /// <param name="expiresAt">绝对过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public Task<bool> AddAllAsync<T>(IDictionary<string, T> items, DateTimeOffset expiryAt)
+        public Task<bool> AddAllAsync<T>(IDictionary<string, T> items, DateTimeOffset expiresAt)
         {
-            return AddAllAsync(items, expiryAt.ToTimeSpan());
+            return AddAllAsync(items, expiresAt.ToTimeSpan());
         }
 
         /// <summary>
@@ -523,25 +528,19 @@ namespace LightCache.Hybird
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="items">要缓存的键值集合</param>
-        /// <param name="expiryIn">滑动过期时间</param>
+        /// <param name="expiresIn">滑动过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public async Task<bool> AddAllAsync<T>(IDictionary<string, T> items, TimeSpan expiryIn)
+        public async Task<bool> AddAllAsync<T>(IDictionary<string, T> items, TimeSpan expiresIn)
         {
-            _local.AddAll(items, expiryIn);
-            await _remote.AddAllAsync(items, expiryIn);
+            _local.AddAll(items, expiresIn);
+            await _remote.AddAllAsync(items, expiresIn);
 
             return true;
         }
 
-        public void Dispose()
-        {
-            _local.Dispose();
-            _remote.Dispose();
-        }
-
-        #region in-memory更新机制
-        readonly string channel_key = "event:key:changed";
-        readonly string channel_prefix = $"{Environment.MachineName}";
+        #region 缓存更新通知
+        private readonly string channel_key = "event:key:changed";
+        private readonly string channel_prefix = $"{Environment.MachineName}";
 
         private void Subscribe()
         {
@@ -554,11 +553,19 @@ namespace LightCache.Hybird
             });
         }
 
-        public Task NotifyChangeFor(string key)
+        public Task<long> NotifyChangeFor(string key)
         {
+            EnsureKey(key);
+
             var channel = new RedisChannel(channel_key, RedisChannel.PatternMode.Literal);
             return _remote.PublishAsync(channel, $"{channel_prefix}:{key}");
         }
         #endregion
+
+        public void Dispose()
+        {
+            _local.Dispose();
+            _remote.Dispose();
+        }
     }
 }

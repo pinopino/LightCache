@@ -12,7 +12,7 @@ namespace LightCache
     /// <summary>
     /// LightCacher缓存交互接口
     /// </summary>
-    public class LightCacher : CacheService, IDisposable
+    public class LightCache : CacheService, IDisposable
     {
         private volatile int _remote_inited;
         private MemoryCache _cache;
@@ -27,7 +27,7 @@ namespace LightCache
         /// <param name="capacity">缓存容量大小</param>
         /// <param name="expiration">默认滑动过期时间</param>
         /// <param name="hybirdCache">是否启用二级缓存</param>
-        public LightCacher(long? capacity, int expiration = 60)
+        public LightCache(long? capacity, int expiration = 60)
         {
             DefaultExpiry = TimeSpan.FromSeconds(expiration);
             _locks = new ConcurrentDictionary<string, SemaphoreSlim>();

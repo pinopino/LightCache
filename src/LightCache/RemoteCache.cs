@@ -18,7 +18,7 @@ namespace LightCache.Remote
     {
         private IDatabase _db;
         private ConnectionMultiplexer _connector;
-        private ConcurrentDictionary<string, SemaphoreSlim> _locks = new ConcurrentDictionary<string, SemaphoreSlim>();
+        private ConcurrentDictionary<string, SemaphoreSlim> _locks;
 
         public IDatabase DB { get { return _db; } }
 
@@ -26,6 +26,7 @@ namespace LightCache.Remote
         {
             _connector = ConnectionMultiplexer.Connect(host);
             _db = _connector.GetDatabase();
+            _locks = new ConcurrentDictionary<string, SemaphoreSlim>();
         }
 
         /// <summary>
@@ -167,14 +168,14 @@ namespace LightCache.Remote
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="valFactory">缓存值的构造factory</param>
-        /// <param name="expiryAt">绝对过期时间</param>
+        /// <param name="expiresAt">绝对过期时间</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public T GetOrAdd<T>(string key, Func<Task<T>> valFactory, DateTimeOffset expiryAt)
+        public T GetOrAdd<T>(string key, Func<Task<T>> valFactory, DateTimeOffset expiresAt)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            InnerGet(key, valFactory, expiryAt.ToTimeSpan(), out T value, false);
+            InnerGet(key, valFactory, expiresAt.ToTimeSpan(), out T value, false);
 
             return value;
         }
@@ -185,14 +186,14 @@ namespace LightCache.Remote
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="valFactory">缓存值的构造factory</param>
-        /// <param name="expiryIn">滑动过期时间</param>
+        /// <param name="expiresIn">滑动过期时间</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public T GetOrAdd<T>(string key, Func<Task<T>> valFactory, TimeSpan expiryIn)
+        public T GetOrAdd<T>(string key, Func<Task<T>> valFactory, TimeSpan expiresIn)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            InnerGet(key, valFactory, expiryIn, out T value, true);
+            InnerGet(key, valFactory, expiresIn, out T value, true);
 
             return value;
         }
@@ -220,14 +221,14 @@ namespace LightCache.Remote
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="valFactory">缓存值的构造factory</param>
-        /// <param name="expiryAt">绝对过期时间</param>
+        /// <param name="expiresAt">绝对过期时间</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset expiryAt)
+        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset expiresAt)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            var res = await InnerGetAsync(key, valFactory, expiryAt.ToTimeSpan()).ConfigureAwait(false);
+            var res = await InnerGetAsync(key, valFactory, expiresAt.ToTimeSpan()).ConfigureAwait(false);
 
             return res.Value;
         }
@@ -238,14 +239,14 @@ namespace LightCache.Remote
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="valFactory">缓存值的构造factory</param>
-        /// <param name="expiryIn">滑动过期时间</param>
+        /// <param name="expiresIn">滑动过期时间</param>
         /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan expiryIn)
+        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan expiresIn)
         {
             EnsureKey(key);
             EnsureNotNull(nameof(valFactory), valFactory);
 
-            var res = await InnerGetAsync(key, valFactory, expiryIn, true).ConfigureAwait(false);
+            var res = await InnerGetAsync(key, valFactory, expiresIn, true).ConfigureAwait(false);
 
             return res.Value;
         }
@@ -269,12 +270,13 @@ namespace LightCache.Remote
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="value">要缓存的值</param>
-        /// <param name="expiryAt">绝对过期时间</param>
+        /// <param name="expiresAt">绝对过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool Add<T>(string key, T value, DateTimeOffset expiryAt)
+        public bool Add<T>(string key, T value, DateTimeOffset expiresAt)
         {
-            // 说明：expiryAt转成timespan并不影响，这里不关心过期语义语义
-            return Add(key, value, expiryAt.ToTimeSpan());
+            // 说明：expiresAt转成timespan并不影响，这里不关心过期语义
+            // 下同。
+            return Add(key, value, expiresAt.ToTimeSpan());
         }
 
         /// <summary>
@@ -283,13 +285,13 @@ namespace LightCache.Remote
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="value">要缓存的值</param>
-        /// <param name="expiryIn">滑动过期时间</param>
+        /// <param name="expiresIn">滑动过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool Add<T>(string key, T value, TimeSpan expiryIn)
+        public bool Add<T>(string key, T value, TimeSpan expiresIn)
         {
             EnsureKey(key);
             // link: https://stackoverflow.com/questions/25898333/how-to-add-generic-list-to-redis-via-stackexchange-redis
-            return _db.StringSet(key, JsonConvert.SerializeObject(value), expiryIn);
+            return _db.StringSet(key, JsonConvert.SerializeObject(value), expiresIn);
         }
 
         /// <summary>
@@ -311,11 +313,11 @@ namespace LightCache.Remote
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="value">要缓存的值</param>
-        /// <param name="expiryAt">绝对过期时间</param>
+        /// <param name="expiresAt">绝对过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public Task<bool> AddAsync<T>(string key, T value, DateTimeOffset expiryAt)
+        public Task<bool> AddAsync<T>(string key, T value, DateTimeOffset expiresAt)
         {
-            return AddAsync(key, value, expiryAt.ToTimeSpan());
+            return AddAsync(key, value, expiresAt.ToTimeSpan());
         }
 
         /// <summary>
@@ -324,12 +326,12 @@ namespace LightCache.Remote
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="value">要缓存的值</param>
-        /// <param name="expiryIn">滑动过期时间</param>
+        /// <param name="expiresIn">滑动过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public Task<bool> AddAsync<T>(string key, T value, TimeSpan expiryIn)
+        public Task<bool> AddAsync<T>(string key, T value, TimeSpan expiresIn)
         {
             EnsureKey(key);
-            return _db.StringSetAsync(key, JsonConvert.SerializeObject(value), expiryIn);
+            return _db.StringSetAsync(key, JsonConvert.SerializeObject(value), expiresIn);
         }
 
         /// <summary>
@@ -366,14 +368,14 @@ namespace LightCache.Remote
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="keys">指定的键集合</param>
-        /// <param name="expiryIn">通过指定expiry以刷新缓存项的过期时间</param>
+        /// <param name="expiresIn">通过指定expiry以刷新缓存项的过期时间</param>
         /// <param name="defaultVal">当键不存在时返回的指定值</param>
         /// <returns>一个字典包含键和对应的值</returns>
-        public IDictionary<string, T> GetAll<T>(IEnumerable<string> keys, TimeSpan expiryIn, T defaultVal = default)
+        public IDictionary<string, T> GetAll<T>(IEnumerable<string> keys, TimeSpan expiresIn, T defaultVal = default)
         {
             var ret = GetAll(keys, defaultVal);
 
-            UpdateExpiryAll(keys.ToArray(), expiryIn);
+            UpdateExpiryAll(keys.ToArray(), expiresIn);
 
             return ret;
         }
@@ -407,14 +409,14 @@ namespace LightCache.Remote
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="keys">指定的键集合</param>
-        /// <param name="expiryIn">通过指定expiry以刷新缓存项的过期时间</param>
+        /// <param name="expiresIn">通过指定expiry以刷新缓存项的过期时间</param>
         /// <param name="defaultVal">当键不存在时返回的指定值</param>
         /// <returns>一个字典包含键和对应的值</returns>
-        public async Task<IDictionary<string, T>> GetAllAsync<T>(IEnumerable<string> keys, TimeSpan expiryIn, T defaultVal = default)
+        public async Task<IDictionary<string, T>> GetAllAsync<T>(IEnumerable<string> keys, TimeSpan expiresIn, T defaultVal = default)
         {
             var ret = await GetAllAsync(keys, defaultVal).ConfigureAwait(false);
 
-            UpdateExpiryAllAsync(keys.ToArray(), expiryIn);
+            UpdateExpiryAllAsync(keys.ToArray(), expiresIn);
 
             return ret;
         }
@@ -439,11 +441,11 @@ namespace LightCache.Remote
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="items">要缓存的键值集合</param>
-        /// <param name="expiryAt">绝对过期时间</param>
+        /// <param name="expiresAt">绝对过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool AddAll<T>(IDictionary<string, T> items, DateTimeOffset expiryAt)
+        public bool AddAll<T>(IDictionary<string, T> items, DateTimeOffset expiresAt)
         {
-            return AddAll(items, expiryAt.ToTimeSpan());
+            return AddAll(items, expiresAt.ToTimeSpan());
         }
 
         /// <summary>
@@ -451,9 +453,9 @@ namespace LightCache.Remote
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="items">要缓存的键值集合</param>
-        /// <param name="expiryAt">滑动过期时间</param>
+        /// <param name="expiresAt">滑动过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool AddAll<T>(IDictionary<string, T> items, TimeSpan expiryIn)
+        public bool AddAll<T>(IDictionary<string, T> items, TimeSpan expiresIn)
         {
             var values = items
                 .Select(p => new KeyValuePair<RedisKey, RedisValue>(p.Key, JsonConvert.SerializeObject(p.Value)))
@@ -461,7 +463,7 @@ namespace LightCache.Remote
 
             var ret = _db.StringSet(values);
             foreach (var value in values)
-                _db.KeyExpire(value.Key, expiryIn, CommandFlags.FireAndForget);
+                _db.KeyExpire(value.Key, expiresIn, CommandFlags.FireAndForget);
 
             return ret;
         }
@@ -486,11 +488,11 @@ namespace LightCache.Remote
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="items">要缓存的键值集合</param>
-        /// <param name="expiryAt">绝对过期时间</param>
+        /// <param name="expiresAt">绝对过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public Task<bool> AddAllAsync<T>(IDictionary<string, T> items, DateTimeOffset expiryAt)
+        public Task<bool> AddAllAsync<T>(IDictionary<string, T> items, DateTimeOffset expiresAt)
         {
-            return AddAllAsync(items, expiryAt.ToTimeSpan());
+            return AddAllAsync(items, expiresAt.ToTimeSpan());
         }
 
         /// <summary>
@@ -498,9 +500,9 @@ namespace LightCache.Remote
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="items">要缓存的键值集合</param>
-        /// <param name="expiryIn">滑动过期时间</param>
+        /// <param name="expiresIn">滑动过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public async Task<bool> AddAllAsync<T>(IDictionary<string, T> items, TimeSpan expiryIn)
+        public async Task<bool> AddAllAsync<T>(IDictionary<string, T> items, TimeSpan expiresIn)
         {
             var values = items
                 .Select(p => new KeyValuePair<RedisKey, RedisValue>(p.Key, JsonConvert.SerializeObject(p.Value)))
@@ -508,7 +510,7 @@ namespace LightCache.Remote
 
             var ret = await _db.StringSetAsync(values).ConfigureAwait(false);
             foreach (var value in values)
-                _db.KeyExpire(value.Key, expiryIn, CommandFlags.FireAndForget);
+                _db.KeyExpire(value.Key, expiresIn, CommandFlags.FireAndForget);
 
             return ret;
         }
@@ -593,7 +595,19 @@ namespace LightCache.Remote
             return new AsyncResult<T> { Success = true, Value = JsonConvert.DeserializeObject<T>(val) };
         }
 
-        #region pub/sub支持
+        private void UpdateExpiryAll(string[] keys, TimeSpan expiresIn)
+        {
+            for (var i = 0; i < keys.Length; i++)
+                _db.KeyExpire(keys[i], expiresIn, CommandFlags.FireAndForget);
+        }
+
+        private void UpdateExpiryAllAsync(string[] keys, TimeSpan expiresIn)
+        {
+            for (var i = 0; i < keys.Length; i++)
+                _db.KeyExpireAsync(keys[i], expiresIn, CommandFlags.FireAndForget);
+        }
+
+        #region Pub/Sub支持
         internal void Subscribe(RedisChannel channel, Action<RedisValue> handler)
         {
             EnsureNotNull(nameof(handler), handler);
@@ -601,29 +615,17 @@ namespace LightCache.Remote
             var sub = _connector.GetSubscriber();
             // 事件的顺序不做保证，如果需要请注册channel的onmessage
             // link: https://stackexchange.github.io/StackExchange.Redis/PubSubOrder
-            sub.Subscribe(channel, (redisChannel, value) => handler(value), CommandFlags.FireAndForget);
+            sub.Subscribe(channel, (redisChannel, value) => handler(value));
         }
 
-        internal Task PublishAsync(RedisChannel channel, string key)
+        internal Task<long> PublishAsync(RedisChannel channel, string key)
         {
             EnsureKey(key);
 
             var sub = _connector.GetSubscriber();
-            return sub.PublishAsync(channel, key, CommandFlags.FireAndForget);
+            return sub.PublishAsync(channel, key);
         }
         #endregion
-
-        private void UpdateExpiryAll(string[] keys, TimeSpan expiryIn)
-        {
-            for (var i = 0; i < keys.Length; i++)
-                _db.KeyExpire(keys[i], expiryIn, CommandFlags.FireAndForget);
-        }
-
-        private void UpdateExpiryAllAsync(string[] keys, TimeSpan expiryIn)
-        {
-            for (var i = 0; i < keys.Length; i++)
-                _db.KeyExpireAsync(keys[i], expiryIn, CommandFlags.FireAndForget);
-        }
 
         public void Dispose()
         {
