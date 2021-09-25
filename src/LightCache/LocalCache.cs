@@ -15,6 +15,7 @@ namespace LightCache
     public class LightCache : CacheService, IDisposable
     {
         private volatile int _remote_inited;
+        private string _remoteHost;
         private MemoryCache _cache;
         private RemoteCache _remote;
         private ConcurrentDictionary<string, SemaphoreSlim> _locks;
@@ -27,11 +28,12 @@ namespace LightCache
         /// <param name="capacity">缓存容量大小</param>
         /// <param name="expiration">默认滑动过期时间</param>
         /// <param name="hybirdCache">是否启用二级缓存</param>
-        public LightCache(long? capacity, int expiration = 60)
+        public LightCache(long? capacity, int expiration = 60, string remoteHost = "")
         {
             DefaultExpiry = TimeSpan.FromSeconds(expiration);
             _locks = new ConcurrentDictionary<string, SemaphoreSlim>();
             _cache = new MemoryCache(new MemoryCacheOptions { SizeLimit = capacity });
+            _remoteHost = remoteHost;
         }
 
         public RemoteCache Remote
@@ -40,14 +42,12 @@ namespace LightCache
             {
                 if (Interlocked.Exchange(ref _remote_inited, 1) == 0)
                 {
+                    if (string.IsNullOrEmpty(_remoteHost))
+                        throw new ArgumentNullException("要使用remote缓存请指定remoteHost参数");
+
                     if (_remote == null)
                     {
-                        var builder = new ConfigurationBuilder()
-                            .SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
-                            .AddJsonFile("appsettings.json");
-                        var configuration = builder.Build();
-                        var host = configuration.GetSection("LightCache:RemoteHost").Value;
-                        _remote = new RemoteCache(host);
+                        _remote = new RemoteCache(_remoteHost);
                     }
                 }
                 return _remote;
