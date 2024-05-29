@@ -1,8 +1,8 @@
-﻿using LightCache.Common;
+﻿using Microsoft.Extensions.Caching.Memory;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using StackExchange.Redis;
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -18,15 +18,19 @@ namespace LightCache.Remote
     {
         private IDatabase _db;
         private ConnectionMultiplexer _connector;
-        private ConcurrentDictionary<string, SemaphoreSlim> _locks;
+        private MemoryCache _locks;
 
         public IDatabase DB { get { return _db; } }
+        public TimeSpan DefaultExpiry { get; private set; }
+        public TimeSpan DefaultLockAbsoluteExpiry { get; private set; }
 
-        internal RemoteCache(string host)
+        public RemoteCache(string host, int expiration = 60)
         {
             _connector = ConnectionMultiplexer.Connect(host);
             _db = _connector.GetDatabase();
-            _locks = new ConcurrentDictionary<string, SemaphoreSlim>();
+            _locks = new MemoryCache(new MemoryCacheOptions { SizeLimit = 1024 });
+            DefaultExpiry = TimeSpan.FromSeconds(expiration);
+            DefaultLockAbsoluteExpiry = TimeSpan.FromMinutes(5);
         }
 
         /// <summary>
@@ -104,23 +108,20 @@ namespace LightCache.Remote
         }
 
         // 说明：
-        // redis中没有滑动过期的概念，但是好在stackexchange.redis提供了一个自带的GetWithExpire方法
-        // 通过该方法我们可以返回key对应的过期时间，如果需要支持滑动过期那么每次get之后再setexpire一下即可
+        // redis中没有滑动过期的概念
         // link：https://redis.io/commands/expire
-        // 下同。
         /// <summary>
         /// 获取指定key对应的缓存项
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="defaultVal">当键不存在时返回的指定值</param>
-        /// <param name="isSlidingExp">指定的键是否是滑动过期的</param>
         /// <returns>若存在返回对应项，否则返回给定的默认值</returns>
-        public T Get<T>(string key, T defaultVal = default, bool isSlidingExp = false)
+        public T Get<T>(string key, T defaultVal = default)
         {
             EnsureKey(key);
 
-            if (InnerGet(key, null, false, null, out T value, isSlidingExp))
+            if (InnerGet(key, valFactory: null, useLock: false, expiry: null, out T value))
                 return value;
 
             return defaultVal;
@@ -132,206 +133,16 @@ namespace LightCache.Remote
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="key">指定的键</param>
         /// <param name="defaultVal">当键不存在时返回的指定值</param>
-        /// <param name="isSlidingExp">指定的键是否是滑动过期的</param>
         /// <returns>若存在返回对应项，否则返回给定的默认值</returns>
-        public async Task<T> GetAsync<T>(string key, T defaultVal = default, bool isSlidingExp = false)
+        public async Task<T> GetAsync<T>(string key, T defaultVal = default)
         {
             EnsureKey(key);
 
-            var res = await InnerGetAsync<T>(key, null, false, null, isSlidingExp).ConfigureAwait(false);
+            var res = await InnerGetAsync<T>(key, null, useLock: false, expiry: null).ConfigureAwait(false);
             if (res.Success)
                 return res.Value;
 
             return defaultVal;
-        }
-
-        /// <summary>
-        /// 获取指定key对应的缓存项，若不存在则填入valFactory产生的值
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="key">指定的键</param>
-        /// <param name="valFactory">缓存值的构造factory</param>
-        /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public T GetOrAdd<T>(string key, Func<Task<T>> valFactory)
-        {
-            EnsureKey(key);
-            EnsureNotNull(nameof(valFactory), valFactory);
-
-            InnerGet(key, valFactory, false, null, out T value);
-
-            return value;
-        }
-
-        /// <summary>
-        /// 获取指定key对应的缓存项，若不存在则填入valFactory产生的值并设定绝对过期
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="key">指定的键</param>
-        /// <param name="valFactory">缓存值的构造factory</param>
-        /// <param name="expiresAt">绝对过期时间</param>
-        /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public T GetOrAdd<T>(string key, Func<Task<T>> valFactory, DateTimeOffset expiresAt)
-        {
-            EnsureKey(key);
-            EnsureNotNull(nameof(valFactory), valFactory);
-
-            InnerGet(key, valFactory, false, expiresAt.ToTimeSpan(), out T value, false);
-
-            return value;
-        }
-
-        /// <summary>
-        /// 获取指定key对应的缓存项，若不存在则填入valFactory产生的值并设定滑动过期
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="key">指定的键</param>
-        /// <param name="valFactory">缓存值的构造factory</param>
-        /// <param name="expiresIn">滑动过期时间</param>
-        /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public T GetOrAdd<T>(string key, Func<Task<T>> valFactory, TimeSpan expiresIn)
-        {
-            EnsureKey(key);
-            EnsureNotNull(nameof(valFactory), valFactory);
-
-            InnerGet(key, valFactory, false, expiresIn, out T value, true);
-
-            return value;
-        }
-
-        /// <summary>
-        /// 异步获取指定key对应的缓存项，若不存在则填入valFactory产生的值
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="key">指定的键</param>
-        /// <param name="valFactory">缓存值的构造factory</param>
-        /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory)
-        {
-            EnsureKey(key);
-            EnsureNotNull(nameof(valFactory), valFactory);
-
-            var res = await InnerGetAsync(key, valFactory, false, null).ConfigureAwait(false);
-
-            return res.Value;
-        }
-
-        /// <summary>
-        /// 异步获取指定key对应的缓存项，若不存在则填入valFactory产生的值并设定绝对过期
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="key">指定的键</param>
-        /// <param name="valFactory">缓存值的构造factory</param>
-        /// <param name="expiresAt">绝对过期时间</param>
-        /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, DateTimeOffset expiresAt)
-        {
-            EnsureKey(key);
-            EnsureNotNull(nameof(valFactory), valFactory);
-
-            var res = await InnerGetAsync(key, valFactory, false, expiresAt.ToTimeSpan()).ConfigureAwait(false);
-
-            return res.Value;
-        }
-
-        /// <summary>
-        /// 异步获取指定key对应的缓存项，若不存在则填入valFactory产生的值并设定滑动过期
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="key">指定的键</param>
-        /// <param name="valFactory">缓存值的构造factory</param>
-        /// <param name="expiresIn">滑动过期时间</param>
-        /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
-        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan expiresIn)
-        {
-            EnsureKey(key);
-            EnsureNotNull(nameof(valFactory), valFactory);
-
-            var res = await InnerGetAsync(key, valFactory, false, expiresIn, true).ConfigureAwait(false);
-
-            return res.Value;
-        }
-
-        /// <summary>
-        /// 缓存一个值
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="key">指定的键</param>
-        /// <param name="value">要缓存的值</param>
-        /// <returns>true为成功，否则失败</returns>
-        public bool Add<T>(string key, T value)
-        {
-            EnsureKey(key);
-            return _db.StringSet(key, JsonConvert.SerializeObject(value), null);
-        }
-
-        /// <summary>
-        /// 缓存一个值，并设定绝对过期
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="key">指定的键</param>
-        /// <param name="value">要缓存的值</param>
-        /// <param name="expiresAt">绝对过期时间</param>
-        /// <returns>true为成功，否则失败</returns>
-        public bool Add<T>(string key, T value, DateTimeOffset expiresAt)
-        {
-            // 说明：expiresAt转成timespan并不影响，这里不关心过期语义
-            // 下同。
-            return Add(key, value, expiresAt.ToTimeSpan());
-        }
-
-        /// <summary>
-        /// 缓存一个值，并设定滑动过期
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="key">指定的键</param>
-        /// <param name="value">要缓存的值</param>
-        /// <param name="expiresIn">滑动过期时间</param>
-        /// <returns>true为成功，否则失败</returns>
-        public bool Add<T>(string key, T value, TimeSpan expiresIn)
-        {
-            EnsureKey(key);
-            // link: https://stackoverflow.com/questions/25898333/how-to-add-generic-list-to-redis-via-stackexchange-redis
-            return _db.StringSet(key, JsonConvert.SerializeObject(value), expiresIn);
-        }
-
-        /// <summary>
-        /// 异步缓存一个值
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="key">指定的键</param>
-        /// <param name="value">要缓存的值</param>
-        /// <returns>true为成功，否则失败</returns>
-        public Task<bool> AddAsync<T>(string key, T value)
-        {
-            EnsureKey(key);
-            return _db.StringSetAsync(key, JsonConvert.SerializeObject(value), null);
-        }
-
-        /// <summary>
-        /// 异步缓存一个值，并设定绝对过期
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="key">指定的键</param>
-        /// <param name="value">要缓存的值</param>
-        /// <param name="expiresAt">绝对过期时间</param>
-        /// <returns>true为成功，否则失败</returns>
-        public Task<bool> AddAsync<T>(string key, T value, DateTimeOffset expiresAt)
-        {
-            return AddAsync(key, value, expiresAt.ToTimeSpan());
-        }
-
-        /// <summary>
-        /// 异步缓存一个值，并设定滑动过期
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="key">指定的键</param>
-        /// <param name="value">要缓存的值</param>
-        /// <param name="expiresIn">滑动过期时间</param>
-        /// <returns>true为成功，否则失败</returns>
-        public Task<bool> AddAsync<T>(string key, T value, TimeSpan expiresIn)
-        {
-            EnsureKey(key);
-            return _db.StringSetAsync(key, JsonConvert.SerializeObject(value), expiresIn);
         }
 
         /// <summary>
@@ -352,30 +163,8 @@ namespace LightCache.Remote
             for (var i = 0; i < redisKeys.Length; i++)
             {
                 var value = res[i];
-                ret.Add(redisKeys[i], value.HasValue ? defaultVal : JsonConvert.DeserializeObject<T>(value));
+                ret.Add(redisKeys[i], value.HasValue ? JsonConvert.DeserializeObject<T>(value) : defaultVal);
             }
-
-            return ret;
-        }
-
-        // 说明：
-        // 这里接口的样子本来应该是类似前面提供一个isSlidingExp参数表明这一批key是滑动过期的。
-        // 无奈stackexchange.redis不支持批量StringGetWithExpiry，所以只能要求调用方传入明确的
-        // 滑动过期时间。
-        // 下同。
-        /// <summary>
-        /// 批量获取指定键对应的缓存项
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="keys">指定的键集合</param>
-        /// <param name="expiresIn">通过指定expiry以刷新缓存项的过期时间</param>
-        /// <param name="defaultVal">当键不存在时返回的指定值</param>
-        /// <returns>一个字典包含键和对应的值</returns>
-        public IDictionary<string, T> GetAll<T>(IEnumerable<string> keys, TimeSpan expiresIn, T defaultVal = default)
-        {
-            var ret = GetAll(keys, defaultVal);
-
-            UpdateExpiryAll(keys.ToArray(), expiresIn);
 
             return ret;
         }
@@ -394,149 +183,145 @@ namespace LightCache.Remote
             var redisKeys = keys.Select(x => (RedisKey)x).ToArray();
             var res = await _db.StringGetAsync(redisKeys).ConfigureAwait(false);
 
-            var ret = new Dictionary<string, T>(StringComparer.Ordinal);
+            var ret = new Dictionary<string, T>();
             for (var i = 0; i < redisKeys.Length; i++)
             {
                 var value = res[i];
-                ret.Add(redisKeys[i], value.HasValue ? defaultVal : JsonConvert.DeserializeObject<T>(value));
+                ret.Add(redisKeys[i], value.HasValue ? JsonConvert.DeserializeObject<T>(value) : defaultVal);
             }
 
             return ret;
         }
 
         /// <summary>
-        /// 异步批量获取指定键对应的缓存项
+        /// 缓存一个值，并设定过期时间
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="keys">指定的键集合</param>
-        /// <param name="expiresIn">通过指定expiry以刷新缓存项的过期时间</param>
-        /// <param name="defaultVal">当键不存在时返回的指定值</param>
-        /// <returns>一个字典包含键和对应的值</returns>
-        public async Task<IDictionary<string, T>> GetAllAsync<T>(IEnumerable<string> keys, TimeSpan expiresIn, T defaultVal = default)
+        /// <param name="key">指定的键</param>
+        /// <param name="value">要缓存的值</param>
+        /// <param name="expiry">过期时间</param>
+        /// <returns>true为成功，否则失败</returns>
+        public bool Add<T>(string key, T value, TimeSpan? expiry = null)
         {
-            var ret = await GetAllAsync(keys, defaultVal).ConfigureAwait(false);
+            EnsureKey(key);
 
-            UpdateExpiryAllAsync(keys.ToArray(), expiresIn);
-
-            return ret;
+            // link: https://stackoverflow.com/questions/25898333/how-to-add-generic-list-to-redis-via-stackexchange-redis
+            return _db.StringSet(key, JsonConvert.SerializeObject(value), expiry);
         }
 
         /// <summary>
-        /// 批量缓存值
+        /// 异步缓存一个值，并设定过期时间
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="items">要缓存的键值集合</param>
+        /// <param name="key">指定的键</param>
+        /// <param name="value">要缓存的值</param>
+        /// <param name="expiry">过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool AddAll<T>(IDictionary<string, T> items)
+        public Task<bool> AddAsync<T>(string key, T value, TimeSpan? expiry = null)
         {
-            var values = items
-                .Select(p => new KeyValuePair<RedisKey, RedisValue>(p.Key, JsonConvert.SerializeObject(p.Value)))
-                .ToArray();
+            EnsureKey(key);
 
-            return _db.StringSet(values);
+            return _db.StringSetAsync(key, JsonConvert.SerializeObject(value), expiry);
         }
 
         /// <summary>
-        /// 批量缓存值，并设定绝对过期
+        /// 批量缓存值，并设定过期时间
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="items">要缓存的键值集合</param>
-        /// <param name="expiresAt">绝对过期时间</param>
+        /// <param name="expiry">过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public bool AddAll<T>(IDictionary<string, T> items, DateTimeOffset expiresAt)
-        {
-            return AddAll(items, expiresAt.ToTimeSpan());
-        }
-
-        /// <summary>
-        /// 批量缓存值，并设定滑动过期
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="items">要缓存的键值集合</param>
-        /// <param name="expiresAt">滑动过期时间</param>
-        /// <returns>true为成功，否则失败</returns>
-        public bool AddAll<T>(IDictionary<string, T> items, TimeSpan expiresIn)
+        public bool AddAll<T>(IDictionary<string, T> items, TimeSpan? expiry = null)
         {
             var values = items
                 .Select(p => new KeyValuePair<RedisKey, RedisValue>(p.Key, JsonConvert.SerializeObject(p.Value)))
                 .ToArray();
 
             var ret = _db.StringSet(values);
-            foreach (var value in values)
-                _db.KeyExpire(value.Key, expiresIn, CommandFlags.FireAndForget);
+            if (ret)
+            {
+                foreach (var value in values)
+                    _db.KeyExpire(value.Key, expiry, CommandFlags.FireAndForget);
+            }
 
             return ret;
         }
 
         /// <summary>
-        /// 异步批量缓存值
+        /// 异步批量缓存值，并设定过期时间
         /// </summary>
         /// <typeparam name="T">类型参数T</typeparam>
         /// <param name="items">要缓存的键值集合</param>
+        /// <param name="expiry">过期时间</param>
         /// <returns>true为成功，否则失败</returns>
-        public Task<bool> AddAllAsync<T>(IDictionary<string, T> items)
-        {
-            var values = items
-                .Select(p => new KeyValuePair<RedisKey, RedisValue>(p.Key, JsonConvert.SerializeObject(p.Value)))
-                .ToArray();
-
-            return _db.StringSetAsync(values);
-        }
-
-        /// <summary>
-        /// 异步批量缓存值，并设定绝对过期
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="items">要缓存的键值集合</param>
-        /// <param name="expiresAt">绝对过期时间</param>
-        /// <returns>true为成功，否则失败</returns>
-        public Task<bool> AddAllAsync<T>(IDictionary<string, T> items, DateTimeOffset expiresAt)
-        {
-            return AddAllAsync(items, expiresAt.ToTimeSpan());
-        }
-
-        /// <summary>
-        /// 异步批量缓存值，并设定滑动过期
-        /// </summary>
-        /// <typeparam name="T">类型参数T</typeparam>
-        /// <param name="items">要缓存的键值集合</param>
-        /// <param name="expiresIn">滑动过期时间</param>
-        /// <returns>true为成功，否则失败</returns>
-        public async Task<bool> AddAllAsync<T>(IDictionary<string, T> items, TimeSpan expiresIn)
+        public async Task<bool> AddAllAsync<T>(IDictionary<string, T> items, TimeSpan? expiry = null)
         {
             var values = items
                 .Select(p => new KeyValuePair<RedisKey, RedisValue>(p.Key, JsonConvert.SerializeObject(p.Value)))
                 .ToArray();
 
             var ret = await _db.StringSetAsync(values).ConfigureAwait(false);
-            foreach (var value in values)
-                _db.KeyExpire(value.Key, expiresIn, CommandFlags.FireAndForget);
+            if (ret)
+            {
+                foreach (var value in values)
+                    _db.KeyExpire(value.Key, expiry, CommandFlags.FireAndForget);
+            }
 
             return ret;
         }
 
-        internal bool InnerGet<T>(string key, Func<Task<T>> valFactory, bool useLock, TimeSpan? expiry, out T value, bool isSlidingExp = false)
+        /// <summary>
+        /// 获取指定key对应的缓存项，若不存在则填入valFactory产生的值并设定过期时间
+        /// </summary>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="key">指定的键</param>
+        /// <param name="valFactory">缓存值的构造factory</param>
+        /// <param name="expiry">过期时间</param>
+        /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
+        public T GetOrAdd<T>(string key, Func<T> valFactory, TimeSpan? expiry = null, bool useLock = true)
+        {
+            EnsureKey(key);
+            EnsureNotNull(nameof(valFactory), valFactory);
+
+            if (InnerGet(key, valFactory, useLock, expiry, out T value))
+                return value;
+
+            return default;
+        }
+
+        /// <summary>
+        /// 异步获取指定key对应的缓存项，若不存在则填入valFactory产生的值并设定过期时间
+        /// </summary>
+        /// <typeparam name="T">类型参数T</typeparam>
+        /// <param name="key">指定的键</param>
+        /// <param name="valFactory">缓存值的构造factory</param>
+        /// <param name="expiry">过期时间</param>
+        /// <returns>若存在返回对应项，否则缓存构造的值并返回</returns>
+        public async Task<T> GetOrAddAsync<T>(string key, Func<Task<T>> valFactory, TimeSpan? expiry = null, bool useLock = true)
+        {
+            EnsureKey(key);
+            EnsureNotNull(nameof(valFactory), valFactory);
+
+            var res = await InnerGetAsync(key, valFactory, useLock, expiry).ConfigureAwait(false);
+            if (res.Success)
+                return res.Value;
+
+            return default;
+        }
+
+        internal bool InnerGet<T>(string key, Func<T> valFactory, bool useLock, TimeSpan? expiry, out T value)
         {
             // 说明：
-            // 这里有一个get-and-set，取决于具体场景在某些情况下是有可能存在race condition的。
-            // 所以讲道理此处应该做并发保护，stackexchange.redis也提供了非常方便的事务支持。
-            // 但是这里还是先分开get了，原因是如果真的存在的话那么可以省掉一次json序列化开销，
-            // 而当发现不存在的时候我们再调用StringSet + When.NotExists即可。
-            TimeSpan? exp = default;
-            RedisValue val;
-            if (isSlidingExp)
-            {
-                var res = _db.StringGetWithExpiry(key);
-                exp = res.Expiry;
-                val = res.Value;
-            }
-            else
-            {
-                var res = _db.StringGet(key);
-                val = res;
-            }
-
-            if (!val.HasValue)
+            // 这里是一个典型的get-and-set，需要考虑两个地方的保护：
+            // 1. set的那一下根据业务需要可能需要保护（redis WATCH），也可能不需要（此时最后一次set获胜）
+            // 2. 当对应键不存在的时候valFactory被执行多次（这个看情况也会需要保护）
+            //    两个层面可能存在多次执行：
+            //    a. 进程内多个线程同时调用该方法
+            //    b. 多个进程间的某个线程调用该方法
+            //    前者走正常的本地线程同步即可，后者需要一个类似分布式锁的存在以便能协调多个进程（本地，跨机器都有可能）
+            // （useLock参数是针对第二种情况设计的）
+            var res = _db.StringGet(key);
+            if (!res.HasValue)
             {
                 if (valFactory == null)
                 {
@@ -544,116 +329,130 @@ namespace LightCache.Remote
                     return false;
                 }
 
-                if (!useLock)
-                {
-                    value = valFactory().Result;
-                    return _db.StringSet(key, JsonConvert.SerializeObject(value), expiry, When.NotExists);
-                }
-                else
+                if (useLock)
                 {
                     var ret = RetryWithLock(key, valFactory, expiry);
                     value = ret.value;
                     return ret.success;
                 }
+                else
+                {
+                    lock (string.Intern(key))
+                    {
+                        res = _db.StringGet(key);
+                        if (!res.HasValue)
+                        {
+                            value = valFactory();
+                            return _db.StringSet(key, JsonConvert.SerializeObject(value), expiry, When.NotExists);
+                        }
+                        value = JsonConvert.DeserializeObject<T>(res);
+                    }
+                }
             }
-
-            if (isSlidingExp)
+            else
             {
-                // 进一步确定这是一个需要滑动过期的key（上层调用这可能记错了传了个isSlidingExp=true进来）
-                if (exp.HasValue)
-                    _db.KeyExpire(key, exp.Value, CommandFlags.FireAndForget);
+                value = JsonConvert.DeserializeObject<T>(res);
             }
-            value = JsonConvert.DeserializeObject<T>(val);
 
             return true;
         }
 
-        internal async Task<AsyncResult<T>> InnerGetAsync<T>(string key, Func<Task<T>> valFactory, bool useLock, TimeSpan? expiry, bool isSlidingExp = false)
+        internal async Task<AsyncResult<T>> InnerGetAsync<T>(string key, Func<Task<T>> valFactory, bool useLock, TimeSpan? expiry)
         {
-            TimeSpan? exp = default;
-            RedisValue val;
-            if (isSlidingExp)
-            {
-                var res = await _db.StringGetWithExpiryAsync(key);
-                exp = res.Expiry;
-                val = res.Value;
-            }
-            else
-            {
-                var res = await _db.StringGetAsync(key);
-                val = res;
-            }
-
-            if (!val.HasValue)
+            var res = await _db.StringGetAsync(key).ConfigureAwait(false);
+            if (!res.HasValue)
             {
                 if (valFactory == null)
                     return new AsyncResult<T> { Success = false, Value = default };
 
-                if (!useLock)
+                if (useLock)
                 {
-                    var value = await valFactory();
-                    var success = await _db.StringSetAsync(key, JsonConvert.SerializeObject(value), expiry, When.NotExists);
-                    return new AsyncResult<T> { Success = success, Value = value };
+                    var ret = await RetryWithLockAsync(key, valFactory, expiry).ConfigureAwait(false);
+                    return new AsyncResult<T> { Success = ret.success, Value = ret.value };
                 }
                 else
                 {
-                    var ret = await RetryWithLockAsync(key, valFactory, expiry);
-                    return new AsyncResult<T> { Success = ret.success, Value = ret.value };
+                    // 这里锁的获取仍然会存在valFactory被多次执行的可能，取决于业务逻辑这里
+                    // 可能会有问题；
+                    // 如果只是创建一个值的话那么是没什么的，但是麻烦就在于此处我们是要使用
+                    // 锁来同步线程，这把锁对于并发过来的线程来说一定得是同一把才行；因此正确
+                    // 的做法是得再在外面套一层lock :(
+                    SemaphoreSlim mylock;
+                    lock (string.Intern(key))
+                    {
+                        mylock = _locks.GetOrCreate(key, entry =>
+                        {
+                            var semaphore = new SemaphoreSlim(1, 1);
+                            entry.Size = 1;
+                            entry.SetSlidingExpiration(DefaultLockAbsoluteExpiry);
+                            entry.RegisterPostEvictionCallback(PostEvictionCallback, semaphore);
+                            return semaphore;
+                        });
+                    }
+                    try
+                    {
+                        await mylock.WaitAsync().ConfigureAwait(false);
+
+                        res = await _db.StringGetAsync(key).ConfigureAwait(false);
+                        if (!res.HasValue)
+                        {
+                            var value = await valFactory().ConfigureAwait(false);
+                            var success = await _db.StringSetAsync(key, JsonConvert.SerializeObject(value), expiry, When.NotExists)
+                                .ConfigureAwait(false);
+
+                            return new AsyncResult<T> { Success = success, Value = value };
+                        }
+                        return new AsyncResult<T> { Success = true, Value = JsonConvert.DeserializeObject<T>(res) };
+                    }
+                    finally
+                    {
+                        mylock.Release();
+                    }
                 }
             }
 
-            if (isSlidingExp)
-            {
-                // 进一步确定这是一个需要滑动过期的key（上层调用这可能记错了传了个isSlidingExp=true进来）
-                if (exp.HasValue)
-                    _db.KeyExpire(key, exp.Value, CommandFlags.FireAndForget);
-            }
-
-            return new AsyncResult<T> { Success = true, Value = JsonConvert.DeserializeObject<T>(val) };
-        }
-
-        private void UpdateExpiryAll(string[] keys, TimeSpan expiresIn)
-        {
-            for (var i = 0; i < keys.Length; i++)
-                _db.KeyExpire(keys[i], expiresIn, CommandFlags.FireAndForget);
-        }
-
-        private void UpdateExpiryAllAsync(string[] keys, TimeSpan expiresIn)
-        {
-            for (var i = 0; i < keys.Length; i++)
-                _db.KeyExpireAsync(keys[i], expiresIn, CommandFlags.FireAndForget);
+            return new AsyncResult<T> { Success = true, Value = JsonConvert.DeserializeObject<T>(res) };
         }
 
         #region lock
-        private TimeSpan _lockTimeout;
+        private int _retryCount = 20;
+        private TimeSpan _lockTimeout = TimeSpan.FromSeconds(10);
         // link：https://stackoverflow.com/questions/25127172/stackexchange-redis-locktake-lockrelease-usage
-        private (bool success, T value) RetryWithLock<T>(string key, Func<Task<T>> valFactory, TimeSpan? expiry)
+        private (bool success, T value) RetryWithLock<T>(string key, Func<T> valFactory, TimeSpan? expiry)
         {
             var lockName = $"{key}_lock___";
+            // We tend to use the machine-name (or a munged version of the machine name if multiple processes
+            // could be competing on the same machine).
             var lockToken = Environment.MachineName;
             var count = 0;
-            while (count < 5)
+            while (count < _retryCount)
             {
-                //check for access to cache object, trying to lock it
+                // check for access to cache object, trying to lock it
                 if (!_db.LockTake(lockName, lockToken, _lockTimeout))
                 {
                     count++;
-                    Thread.Sleep(100); //sleep for 100 milliseconds for next lock try. you can play with that
+                    Thread.Sleep(100); // sleep for 100 milliseconds for next lock try. you can play with that
                     continue;
                 }
 
+                // double check goes here
                 var res = _db.StringGet(key);
-                if (res.HasValue)
-                    return (true, JsonConvert.DeserializeObject<T>(res));
-
-                try
+                if (!res.HasValue)
                 {
-                    var val = valFactory().Result;
-                    return (_db.StringSet(key, JsonConvert.SerializeObject(val), expiry, When.NotExists), val);
+                    try
+                    {
+                        var val = valFactory();
+                        var ret = _db.StringSet(key, JsonConvert.SerializeObject(val), expiry, When.NotExists);
+                        return (ret, val);
+                    }
+                    finally
+                    {
+                        _db.LockRelease(lockName, lockToken);
+                    }
                 }
-                finally
+                else
                 {
-                    _db.LockRelease(lockName, lockToken);
+                    return (true, JsonConvert.DeserializeObject<T>(res));
                 }
             }
 
@@ -665,7 +464,7 @@ namespace LightCache.Remote
             var lockName = $"{key}_lock___";
             var lockToken = Environment.MachineName;
             var count = 0;
-            while (count < 5)
+            while (count < _retryCount)
             {
                 if (!_db.LockTake(lockName, lockToken, _lockTimeout))
                 {
@@ -674,18 +473,25 @@ namespace LightCache.Remote
                     continue;
                 }
 
-                var res = await _db.StringGetAsync(key);
-                if (res.HasValue)
-                    return (true, JsonConvert.DeserializeObject<T>(res));
-
-                try
+                // double check goes here
+                var res = await _db.StringGetAsync(key).ConfigureAwait(false);
+                if (!res.HasValue)
                 {
-                    var val = await valFactory();
-                    return (await _db.StringSetAsync(key, JsonConvert.SerializeObject(val), expiry, When.NotExists), val);
+                    try
+                    {
+                        var val = await valFactory().ConfigureAwait(false);
+                        var ret = await _db.StringSetAsync(key, JsonConvert.SerializeObject(val), expiry, When.NotExists)
+                            .ConfigureAwait(false);
+                        return (ret, val);
+                    }
+                    finally
+                    {
+                        _db.LockRelease(lockName, lockToken);
+                    }
                 }
-                finally
+                else
                 {
-                    _db.LockRelease(lockName, lockToken);
+                    return (true, JsonConvert.DeserializeObject<T>(res));
                 }
             }
 
@@ -693,35 +499,24 @@ namespace LightCache.Remote
         }
         #endregion
 
-        #region Pub/Sub支持
-        internal void Subscribe(RedisChannel channel, Action<RedisValue> handler)
+        private static void PostEvictionCallback(object cacheKey, object cacheValue, EvictionReason evictionReason, object state)
         {
-            EnsureNotNull(nameof(handler), handler);
-
-            var sub = _connector.GetSubscriber();
-            // 事件的顺序不做保证，如果需要请注册channel的onmessage
-            // link: https://stackexchange.github.io/StackExchange.Redis/PubSubOrder
-            sub.Subscribe(channel, (redisChannel, value) => handler(value));
+            var semaphore = state as SemaphoreSlim;
+            if (semaphore != null)
+                semaphore?.Dispose();
         }
 
-        internal Task<long> PublishAsync(RedisChannel channel, string key)
+        // for test only
+        internal MemoryCache GetLockCache()
         {
-            EnsureKey(key);
-
-            var sub = _connector.GetSubscriber();
-            return sub.PublishAsync(channel, key);
+            return _locks;
         }
-        #endregion
 
         public void Dispose()
         {
             FlushDatabase();
-            _db.Multiplexer.GetSubscriber().UnsubscribeAll();
-            if (_locks != null)
-            {
-                foreach (var @lock in _locks)
-                    @lock.Value.Dispose();
-            }
+            _connector?.Dispose();
+            _locks?.Dispose();
         }
 
         private void FlushDatabase()

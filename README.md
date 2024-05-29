@@ -20,6 +20,7 @@
   ```
 
 ### 多级缓存
+#### 更新（2024-05-23）：取消了对于多级缓存的支持。要想完整支持感觉过于麻烦，并且在使用中也有诸多思考负担，考虑再三还是去掉了对于该功能的支持；
 #### 场景
 对于多级缓存的使用场景我做了一个假设，即应用程序是分布式部署的（常见的如`web-farm`）。通常在这种量级的环境中才有使用多级缓存的价值，简单的单机情况上面提到的两种缓存足够应付了。
 
@@ -77,7 +78,7 @@ cache.Add(obj);
 var redis = ConnectionMultiplexer.Connect("localhost");
 IDatabase db = redis.GetDatabase(databaseNumber, asyncState);
 ```
-如上面代码展示的那样，通过`ConnectionMultiplexer`拿到了`IDatabase`，这之后的事情就非常简单了。我们正是通过这个接口来发送各种各样redis命令到服务端的。
+如上面代码展示的那样，通过`ConnectionMultiplexer`拿到了`IDatabase`（这个对象也是一个[线程安全](https://github.com/StackExchange/StackExchange.Redis/issues/636)的对象），这之后的事情就非常简单了。我们正是通过这个接口来发送各种各样redis命令到服务端的。
 
 #### 调用方式
 所有的redis命令也就是IDatabase接口的所有方法都支持三种模式的调用：
@@ -93,7 +94,7 @@ IDatabase db = redis.GetDatabase(databaseNumber, asyncState);
 值的类型是`RedisValue`，类似也是提供了很多方便代码编写的隐式转换。
 
 #### 事务
-这里先说说redis原生的事务机制，像redis一样，其事务模型也是非常简单易懂的。
+这里先说说redis原生的[事务](https://redis.io/docs/latest/develop/interact/transactions/)机制，像redis一样，其事务模型也是非常简单易懂的。
 
 一组命令`MULTI`、`EXEC`、`DISCARD`以及`WATCH`。redis服务端解析发送过来的命令，遇到MULTI事务即开始；遇到EXEC事务即提交，遇到DISCARD事务即取消。
 
