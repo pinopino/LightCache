@@ -10,7 +10,7 @@ namespace LightCache.Test
         [Fact]
         public void Get_缓存键不存在情况下返回给定的默认值()
         {
-            var cache = new LightCache();
+            var cache = new LocalCache();
 
             var ret1 = cache.Get("testKey", 10);
             Assert.Equal(10, ret1);
@@ -24,7 +24,7 @@ namespace LightCache.Test
         {
             Assert.Throws<ArgumentNullException>(() =>
             {
-                var cache = new LightCache();
+                var cache = new LocalCache();
                 cache.GetOrAdd<int>("testKey", null);
             });
         }
@@ -32,7 +32,7 @@ namespace LightCache.Test
         [Fact]
         public void GetOrAdd_缓存键不存在情况下返回valFactory生成的值()
         {
-            var cache = new LightCache();
+            var cache = new LocalCache();
 
             cache.GetOrAdd("testKey", () => 10);
 
@@ -46,7 +46,7 @@ namespace LightCache.Test
         [Fact]
         public void GetOrAdd_valFactory生成的值可以绝对过期()
         {
-            var cache = new LightCache();
+            var cache = new LocalCache();
 
             var ret1 = cache.GetOrAdd("testKey", () => 10, absExp: DateTimeOffset.Now.AddSeconds(3));
             Assert.Equal(10, ret1);
@@ -63,7 +63,7 @@ namespace LightCache.Test
         [Fact]
         public void GetOrAdd_valFactory生成的值可以滑动过期()
         {
-            var cache = new LightCache();
+            var cache = new LocalCache();
 
             var ret1 = cache.GetOrAdd("testKey", () => 10, slidingExp: TimeSpan.FromSeconds(3));
             Assert.Equal(10, ret1);
@@ -84,7 +84,7 @@ namespace LightCache.Test
         [Fact]
         public void GetOrAdd_并发调用情况下valFactory只会被执行一次()
         {
-            var cache = new LightCache();
+            var cache = new LocalCache();
 
             var item = new Wrapper();
             Parallel.For(0, 5, (index) =>
@@ -102,7 +102,7 @@ namespace LightCache.Test
         [Fact]
         public async Task GetOrAddAsync_valFactory生成的值可以绝对过期()
         {
-            var cache = new LightCache();
+            var cache = new LocalCache();
 
             var ret1 = await cache.GetOrAddAsync("testKey",
                 async () =>
@@ -129,7 +129,7 @@ namespace LightCache.Test
         [Fact]
         public async Task GetOrAddAsync_并发调用情况下valFactory只会被执行一次()
         {
-            var cache = new LightCache();
+            var cache = new LocalCache();
 
             var item = new Wrapper();
             var random = new Random();
@@ -154,7 +154,7 @@ namespace LightCache.Test
         [Fact]
         public async Task GetOrAddAsync_并发调用情况下锁被正确释放()
         {
-            var cache = new LightCache();
+            var cache = new LocalCache();
 
             cache.SetLockAbsoluteExpiration(TimeSpan.FromSeconds(10));
             var item = new Wrapper();
@@ -189,7 +189,7 @@ namespace LightCache.Test
         [Fact]
         public void CacheEntry_设置了滑动过期但仍然可以被兜底绝对过期清除()
         {
-            var cache = new LightCache(capacity: 1024, expiration: 3, absoluteExpiration: 5);
+            var cache = new LocalCache(capacity: 1024, expiration: 3, absoluteExpiration: 5);
 
             var ret1 = cache.GetOrAdd("testKey", () => 10);
             Assert.Equal(10, ret1);

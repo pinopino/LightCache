@@ -11,7 +11,7 @@ namespace LightCache
     /// <summary>
     /// LightCache缓存交互接口
     /// </summary>
-    public class LightCache : CacheService, IDisposable
+    public class LocalCache : CacheService, IDisposable
     {
         private MemoryCache _locks;
         private MemoryCache _cache;
@@ -25,7 +25,7 @@ namespace LightCache
         /// </summary>
         /// <param name="capacity">缓存容量大小</param>
         /// <param name="expiration">默认滑动过期时间（单位秒）</param>
-        public LightCache(long capacity = 1024, int expiration = 60, int absoluteExpiration = 120)
+        public LocalCache(long capacity = 1024, int expiration = 60, int absoluteExpiration = 600)
         {
             _cache = new MemoryCache(new MemoryCacheOptions { SizeLimit = capacity });
             _locks = new MemoryCache(new MemoryCacheOptions { SizeLimit = capacity });
