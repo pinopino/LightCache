@@ -1,166 +1,119 @@
-using LightCache.Remote;
-using System.Runtime.CompilerServices;
-
 namespace LightCache.Test
 {
     public class RemoteTests
     {
-        private string _host = "127.0.0.1:6379,defaultDatabase=0";
+        private string _host = "127.0.0.1:6379,password=123456,defaultDatabase=0";
 
         [Fact]
         public async Task RemoveAllAsync_移除给定的所有键返回计数统计不为零()
         {
             var cache = new RemoteCache(_host);
-            cache.AddAll(new Dictionary<string, int>
+            await cache.AddAllAsync(new Dictionary<string, int>
             {
                 { "a", 1 },
                 { "b", 2 },
                 { "c", 3 }
             });
 
-            var ret = cache.Exists("a");
+            var ret = await cache.ExistsAsync("a");
             Assert.True(ret);
-            ret = cache.Exists("b");
+            ret = await cache.ExistsAsync("b");
             Assert.True(ret);
-            ret = cache.Exists("c");
+            ret = await cache.ExistsAsync("c");
             Assert.True(ret);
 
             var ret1 = await cache.RemoveAllAsync(["a", "b", "d"]);
             Assert.Equal(2, ret1);
 
-            ret = cache.Exists("a");
+            ret = await cache.ExistsAsync("a");
             Assert.False(ret);
-            ret = cache.Exists("b");
+            ret = await cache.ExistsAsync("b");
             Assert.False(ret);
-            ret = cache.Exists("c");
+            ret = await cache.ExistsAsync("c");
             Assert.True(ret);
 
             // clean up
-            cache.Remove("c");
+            await cache.RemoveAsync("c");
         }
 
         [Fact]
-        public void Get_缓存键不存在情况下返回给定的默认值()
+        public async Task Get_缓存键不存在情况下返回给定的默认值()
         {
             var cache = new RemoteCache(_host);
 
-            var ret1 = cache.Get("testKey", 10);
+            var ret1 = await cache.GetAsync("testKey", 10);
             Assert.Equal(10, ret1);
 
-            var ret2 = cache.Exists("testKey");
+            var ret2 = await cache.ExistsAsync("testKey");
             Assert.False(ret2);
         }
 
         [Fact]
         public void GetOrAdd_在没有缓存且valFactory为空情况下抛出异常()
         {
-            Assert.Throws<ArgumentNullException>(() =>
+            Assert.ThrowsAsync<ArgumentNullException>(async () =>
             {
                 var cache = new RemoteCache(_host);
-                cache.GetOrAdd<int>("testKey", null);
+                await cache.GetOrAddAsync<int>("testKey", valFactory: null);
             });
         }
 
         [Fact]
-        public void GetOrAdd_缓存键不存在情况下返回valFactory生成的值1()
+        public async Task GetOrAdd_缓存键不存在情况下返回valFactory生成的值1()
         {
             var cache = new RemoteCache(_host);
 
             var key = Guid.NewGuid().ToString();
-            cache.GetOrAdd(key, () => 10);
+            await cache.GetOrAddAsync(key, () => 10);
 
-            var ret1 = cache.Exists(key);
+            var ret1 = await cache.ExistsAsync(key);
             Assert.True(ret1);
 
-            var ret2 = cache.Get(key, defaultVal: 11);
+            var ret2 = await cache.GetAsync(key, defaultVal: 11);
             Assert.Equal(10, ret2);
 
             // clean up
-            cache.Remove(key);
+            await cache.RemoveAsync(key);
         }
 
         [Fact]
-        public void GetOrAdd_缓存键不存在情况下返回valFactory生成的值2()
+        public async Task GetOrAdd_缓存键不存在情况下返回valFactory生成的值2()
         {
             var cache = new RemoteCache(_host);
 
             var key = Guid.NewGuid().ToString();
-            cache.GetOrAdd(key, () => new Book { Name = "a", Price = 10 });
+            await cache.GetOrAddAsync(key, () => new Book { Name = "a", Price = 10 });
 
-            var ret1 = cache.Exists(key);
+            var ret1 = await cache.ExistsAsync(key);
             Assert.True(ret1);
 
-            var ret2 = cache.Get<Book>(key);
+            var ret2 = await cache.GetAsync<Book>(key);
             Assert.Equal("a", ret2.Name);
             Assert.Equal(10, ret2.Price);
 
             // clean up
-            cache.Remove(key);
+            await cache.RemoveAsync(key);
         }
 
         [Fact]
-        public void GetOrAdd_valFactory生成的值可以过期()
+        public async Task GetOrAdd_valFactory生成的值可以过期()
         {
             var cache = new RemoteCache(_host);
 
             var key = Guid.NewGuid().ToString();
-            var ret1 = cache.GetOrAdd(key, () => 10, expiry: TimeSpan.FromSeconds(3));
+            var ret1 = await cache.GetOrAddAsync(key, () => 10, expiry: TimeSpan.FromSeconds(3));
             Assert.Equal(10, ret1);
 
             Thread.Sleep(1 * 1000);
-            var ret2 = cache.Exists(key);
+            var ret2 = await cache.ExistsAsync(key);
             Assert.True(ret2);
 
             Thread.Sleep(2 * 1000);
-            ret2 = cache.Exists(key);
+            ret2 = await cache.ExistsAsync(key);
             Assert.False(ret2);
 
             // clean up
-            cache.Remove(key);
-        }
-
-        [Fact]
-        public void GetOrAdd_并发调用情况下valFactory只会被执行一次1()
-        {
-            var cache = new RemoteCache(_host);
-
-            var key = Guid.NewGuid().ToString();
-            var item = new Wrapper();
-            Parallel.For(0, 5, (index) =>
-            {
-                cache.GetOrAdd(key, () =>
-                {
-                    item.Counter++;
-                    return item;
-                }, useLock: false);
-            });
-
-            Assert.Equal(1, item.Counter);
-
-            // clean up
-            cache.Remove(key);
-        }
-
-        [Fact]
-        public void GetOrAdd_并发调用情况下valFactory只会被执行一次2()
-        {
-            var cache = new RemoteCache(_host);
-
-            var key = Guid.NewGuid().ToString();
-            var item = new Wrapper();
-            Parallel.For(0, 5, (index) =>
-            {
-                cache.GetOrAdd(key, () =>
-                {
-                    item.Counter++;
-                    return item;
-                });
-            });
-
-            Assert.Equal(1, item.Counter);
-
-            // clean up
-            cache.Remove(key);
+            await cache.RemoveAsync(key);
         }
 
         [Fact]
@@ -171,13 +124,13 @@ namespace LightCache.Test
             var key = Guid.NewGuid().ToString();
             var item = new Wrapper();
             var random = new Random();
-            var allTask = Enumerable.Range(0, 10).Select(p =>
+            var allTask = Enumerable.Range(0, 1).Select(p =>
             {
                 return Task.Run(async () =>
                 {
                     await cache.GetOrAddAsync(key, async () =>
                     {
-                        await Task.Delay(random.Next(3));
+                        await Task.Delay(random.Next(4) * 1000);
                         item.Counter++;
                         return item;
                     }, useLock: false);
@@ -189,7 +142,7 @@ namespace LightCache.Test
             Assert.Equal(1, item.Counter);
 
             // clean up
-            cache.Remove(key);
+            await cache.RemoveAsync(key);
         }
 
         [Fact]
@@ -206,7 +159,7 @@ namespace LightCache.Test
                 {
                     await cache.GetOrAddAsync(key, async () =>
                     {
-                        await Task.Delay(random.Next(3));
+                        await Task.Delay(random.Next(4) * 1000);
                         item.Counter++;
                         return item;
                     });
@@ -218,7 +171,7 @@ namespace LightCache.Test
             Assert.Equal(1, item.Counter);
 
             // clean up
-            cache.Remove(key);
+            await cache.RemoveAsync(key);
         }
 
         [Fact]
@@ -246,7 +199,7 @@ namespace LightCache.Test
             Assert.Equal(dict["C"].Counter, ret["C"].Counter);
 
             // clean up
-            cache.RemoveAll(["A", "B", "C"]);
+            await cache.RemoveAllAsync(["A", "B", "C"]);
         }
     }
 

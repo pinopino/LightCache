@@ -17,8 +17,8 @@ namespace LightCache
 
         protected void EnsureNotNull<T>(string name, IEnumerable<T> values)
         {
-            if (values == null || !values.Any())
-                throw new InvalidOperationException($"集合{name}为空或未包含项");
+            if (values == null || !values.Any() || values.Any(p => p == null))
+                throw new ArgumentNullException($"集合{name}为空或未包含项或包含空项");
         }
 
         protected void EnsureNotNull(string name, object value)

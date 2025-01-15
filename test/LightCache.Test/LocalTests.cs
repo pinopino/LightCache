@@ -1,7 +1,4 @@
-using LightCache.Test.Common;
 using Microsoft.Extensions.Caching.Memory;
-using System.Diagnostics.Metrics;
-using System.Threading.Tasks;
 
 namespace LightCache.Test
 {
@@ -139,7 +136,7 @@ namespace LightCache.Test
                 {
                     await cache.GetOrAddAsync("testKey", async () =>
                     {
-                        await Task.Delay(random.Next(3));
+                        await Task.Delay(random.Next(4) * 1000);
                         item.Counter++;
                         return item;
                     });
@@ -152,7 +149,7 @@ namespace LightCache.Test
         }
 
         [Fact]
-        public async Task GetOrAddAsync_并发调用情况下锁被正确释放()
+        public async Task GetOrAddAsync_并发调用情况下内部锁被正确释放()
         {
             var cache = new LocalCache();
 
@@ -165,7 +162,7 @@ namespace LightCache.Test
                 {
                     await cache.GetOrAddAsync("testKey", async () =>
                     {
-                        await Task.Delay(random.Next(3));
+                        await Task.Delay(random.Next(4) * 1000);
                         item.Counter++;
                         return item;
                     });
@@ -213,6 +210,31 @@ namespace LightCache.Test
             Thread.Sleep(2 * 1000);
             ret2 = cache.Exists("testKey");
             Assert.False(ret2);
+        }
+
+        [Fact]
+        public void 能正常移除缓存项()
+        {
+            var cache = new LocalCache();
+
+            var key = "testKey";
+            var items = new List<Wrapper>
+            {
+                new Wrapper{ Counter = 1 },
+                new Wrapper{ Counter = 2 },
+                new Wrapper{ Counter = 3 }
+            };
+            cache.Add(key, items);
+
+            var cachedItems = cache.Get<List<Wrapper>>(key);
+            Assert.Equal(items, cachedItems);
+            cachedItems.RemoveAt(0);
+
+            cachedItems = cache.Get<List<Wrapper>>(key);
+            Assert.Equal(2, items.Count);
+            Assert.Equal(2, cachedItems.Count);
+            Assert.Equal(items[0], cachedItems[0]);
+            Assert.Equal(items[1], cachedItems[1]);
         }
     }
 
